@@ -19,6 +19,10 @@ RAID_DEVICE="/dev/md0"             # dispositivo RAID a ser criado
 # Usado somente quando CRYPT_DEVICE estiver vazio.
 RAID_MOUNTPOINT="/srv/nas"
 
+# --- Sistema de arquivos do volume RAID (ou do volume dentro do LUKS) ---
+# Opções: ext4, xfs ou btrfs.
+RAID_FILESYSTEM="ext4"
+
 # --- Criptografia (LUKS) ---
 # Deixe CRYPT_DEVICE vazio para NÃO usar criptografia.
 CRYPT_DEVICE="/dev/md0"            # ex.: "/dev/md0" (ou outra partição/disco)
@@ -60,6 +64,13 @@ log()  { echo -e "\e[1;32m[+]\e[0m $*"; }
 warn() { echo -e "\e[1;33m[!]\e[0m $*"; }
 die()  { echo -e "\e[1;31m[x]\e[0m $*" >&2; exit 1; }
 
+validate_raid_filesystem() {
+  case "$RAID_FILESYSTEM" in
+    ext4|xfs|btrfs) ;;
+    *) die "RAID_FILESYSTEM inválido: $RAID_FILESYSTEM. Use ext4, xfs ou btrfs." ;;
+  esac
+}
+
 detect_lan_cidr() {
   local iface
   iface=$(ip -4 route show default | awk '{print $5; exit}')
@@ -73,6 +84,10 @@ install_packages() {
   export DEBIAN_FRONTEND=noninteractive
   apt-get update -qq
   apt-get install -y mdadm samba avahi-daemon ufw python3 python3-psutil smartmontools pciutils fontconfig e2fsprogs util-linux
+  case "$RAID_FILESYSTEM" in
+    xfs) apt-get install -y xfsprogs ;;
+    btrfs) apt-get install -y btrfs-progs ;;
+  esac
   [[ -n "$CRYPT_DEVICE" ]] && apt-get install -y cryptsetup
   # No Debian 13+ o gerador do crypttab fica em pacote separado; em versões antigas ele não existe.
   [[ -n "$CRYPT_DEVICE" ]] && { apt-get install -y systemd-cryptsetup || true; }
@@ -147,17 +162,34 @@ setup_raid() {
   "$SBIN_DIR/update-initramfs" -u
 }
 
-add_fstab() { # uuid mountpoint options
+add_fstab() { # uuid mountpoint filesystem options
   sed -i "\|[[:space:]]$2[[:space:]]|d" /etc/fstab
-  echo "UUID=$1 $2 ext4 $3 0 2" >> /etc/fstab
+  echo "UUID=$1 $2 $3 $4 0 2" >> /etc/fstab
+}
+
+format_raid_filesystem() {
+  local device=$1 existing_filesystem
+  existing_filesystem=$("$SBIN_DIR/blkid" -s TYPE -o value "$device" 2>/dev/null || true)
+  if [[ -n "$existing_filesystem" ]]; then
+    [[ "$existing_filesystem" == "$RAID_FILESYSTEM" ]] || die \
+      "$device já contém $existing_filesystem; RAID_FILESYSTEM está definido como $RAID_FILESYSTEM."
+    return 0
+  fi
+
+  case "$RAID_FILESYSTEM" in
+    ext4)  "$SBIN_DIR/mkfs.ext4" -F "$device" ;;
+    xfs)   "$SBIN_DIR/mkfs.xfs" -f "$device" ;;
+    btrfs) "$SBIN_DIR/mkfs.btrfs" -f "$device" ;;
+  esac
 }
 
 setup_storage() {
   if [[ -z "$CRYPT_DEVICE" ]]; then
-    log "Criptografia desativada; formatando $RAID_DEVICE em ext4."
-    "$SBIN_DIR/blkid" "$RAID_DEVICE" >/dev/null 2>&1 || "$SBIN_DIR/mkfs.ext4" -F "$RAID_DEVICE"
+    log "Criptografia desativada; preparando $RAID_DEVICE em $RAID_FILESYSTEM."
+    format_raid_filesystem "$RAID_DEVICE"
     mkdir -p "$RAID_MOUNTPOINT"
-    add_fstab "$("$SBIN_DIR/blkid" -s UUID -o value "$RAID_DEVICE")" "$RAID_MOUNTPOINT" "defaults,nofail"
+    add_fstab "$("$SBIN_DIR/blkid" -s UUID -o value "$RAID_DEVICE")" \
+      "$RAID_MOUNTPOINT" "$RAID_FILESYSTEM" "defaults,nofail"
     systemctl daemon-reload
     mount "$RAID_MOUNTPOINT"
     return
@@ -187,7 +219,7 @@ setup_storage() {
   fi
 
   [[ -e "/dev/mapper/$CRYPT_NAME" ]] || "$SBIN_DIR/cryptsetup" open "${keyopt[@]}" "$CRYPT_DEVICE" "$CRYPT_NAME"
-  "$SBIN_DIR/blkid" "/dev/mapper/$CRYPT_NAME" >/dev/null 2>&1 || "$SBIN_DIR/mkfs.ext4" -F "/dev/mapper/$CRYPT_NAME"
+  format_raid_filesystem "/dev/mapper/$CRYPT_NAME"
   mkdir -p "$CRYPT_MOUNTPOINT"
 
   local luks_uuid fs_uuid
@@ -198,10 +230,11 @@ setup_storage() {
   if [[ "$CRYPT_AUTO_UNLOCK" == "yes" ]]; then
     # Com keyfile abre sozinho; sem keyfile ("none") a senha é pedida no boot.
     echo "$CRYPT_NAME UUID=$luks_uuid $crypttab_key $crypttab_opts,nofail" >> /etc/crypttab
-    add_fstab "$fs_uuid" "$CRYPT_MOUNTPOINT" "defaults,nofail,x-systemd.requires=systemd-cryptsetup@$CRYPT_NAME.service"
+    add_fstab "$fs_uuid" "$CRYPT_MOUNTPOINT" "$RAID_FILESYSTEM" \
+      "defaults,nofail,x-systemd.requires=systemd-cryptsetup@$CRYPT_NAME.service"
   else
     echo "$CRYPT_NAME UUID=$luks_uuid $crypttab_key $crypttab_opts,noauto" >> /etc/crypttab
-    add_fstab "$fs_uuid" "$CRYPT_MOUNTPOINT" "defaults,noauto,nofail"
+    add_fstab "$fs_uuid" "$CRYPT_MOUNTPOINT" "$RAID_FILESYSTEM" "defaults,noauto,nofail"
     warn "Modo manual: $SBIN_DIR/cryptsetup open ${keyopt[*]:-} $CRYPT_DEVICE $CRYPT_NAME && mount $CRYPT_MOUNTPOINT"
   fi
   [[ -n "$CRYPT_KEYFILE" ]] && warn "A keyfile fica no disco do sistema; faça backup dela em local seguro."
@@ -433,6 +466,8 @@ done
 if [[ "$RUN_ALL" != "yes" && ${#SELECTED_STEPS[@]} -eq 0 ]]; then
   die "Informe ao menos uma etapa ou use --all."
 fi
+
+validate_raid_filesystem
 
 [[ $EUID -eq 0 ]] || die "Execute como root."
 

@@ -586,9 +586,15 @@ def collect_system_filesystems():
     network_filesystems = {"cifs", "smbfs", "nfs", "nfs4", "sshfs", "fuse.sshfs"}
     filesystems = []
     seen_mountpoints = set()
+    seen_devices = set()
     for partition in psutil.disk_partitions(all=False):
         mountpoint = os.path.normpath(partition.mountpoint)
-        if mountpoint in seen_mountpoints or partition.fstype.casefold() in network_filesystems:
+        device = partition.device
+        if (
+            mountpoint in seen_mountpoints
+            or (device and device in seen_devices)
+            or partition.fstype.casefold() in network_filesystems
+        ):
             continue
         seen_mountpoints.add(mountpoint)
         try:
@@ -604,7 +610,9 @@ def collect_system_filesystems():
             "free_bytes": usage.free,
             "percent": usage.percent,
         })
-    return filesystems
+        if device:
+            seen_devices.add(device)
+    return sorted(filesystems, key=lambda filesystem: filesystem["device"].casefold())
 
 
 def collect_status(smb_config=None, smartctl_path=None):

@@ -25,7 +25,7 @@ As etapas podem ser executadas separadamente ou combinadas:
 
 | Opção | O que configura |
 |---|---|
-| `--install` | Instala mdadm, Samba, Avahi, UFW, `python3-psutil`, `smartmontools`, `pciutils`, `fontconfig`, utilitários de armazenamento e WS-Discovery; instala cryptsetup e chrony conforme as opções configuradas. |
+| `--install` | Instala mdadm, Samba, Avahi, UFW, `python3-psutil`, `smartmontools`, `pciutils`, `fontconfig`, utilitários de armazenamento e WS-Discovery; instala `xfsprogs` ou `btrfs-progs` conforme `RAID_FILESYSTEM`, além de cryptsetup e chrony conforme as opções configuradas. |
 | `--raid` | Cria o RAID com `mdadm` e atualiza a configuração de boot. |
 | `--storage` | Formata e monta o volume; pode configurar criptografia LUKS e desbloqueio automático. |
 | `--samba` | Cria usuário/grupo, diretórios, permissões e shares; valida a configuração com `testparm` e reinicia Samba. |
@@ -37,12 +37,21 @@ As etapas podem ser executadas separadamente ou combinadas:
 As opções são editadas na seção **CONFIGURAÇÃO** no começo do script. Os valores fornecidos incluem:
 
 - RAID espelhado nível 1 com `/dev/sdb` e `/dev/sdc`, criado como `/dev/md0`.
+- Sistema de arquivos configurável em `RAID_FILESYSTEM`: `ext4` (padrão), `xfs` ou `btrfs`.
 - Volume em `/srv/nas`; LUKS habilitado sobre `/dev/md0`, com mapeamento `nas_crypt`, keyfile `/etc/nas.key` e desbloqueio automático.
 - Shares `Publico`, `Privado`, `Backup`, `Midia` e `Marcelo`.
 - `Publico` permite convidados; `Backup` e `Midia` usam o grupo `nasgroup`; `Privado` e `Marcelo` são restritos ao usuário `marcelo`.
 - Grupo de trabalho `WORKGROUP`, domínio `local`, detecção automática da rede local, SSH na porta 22 e chrony habilitado.
 
-**Atenção:** revise `RAID_DEVICES`, `RAID_DEVICE`, `CRYPT_DEVICE` e as opções LUKS antes de executar. O RAID apaga assinaturas dos discos selecionados após confirmação. A configuração LUKS também pode formatar o dispositivo e destruir dados. O script pode formatar o sistema de arquivos se não encontrar um nele. A etapa `--samba` substitui `/etc/samba/smb.conf`; guarda uma cópia inicial em `/etc/samba/smb.conf.orig` se ela ainda não existir.
+Para escolher o formato, altere `RAID_FILESYSTEM` na seção **CONFIGURAÇÃO** antes de executar, por exemplo:
+
+```bash
+RAID_FILESYSTEM="xfs"
+```
+
+Sem LUKS, o formato é aplicado diretamente em `RAID_DEVICE`. Com LUKS, o contêiner criptografado fica em `CRYPT_DEVICE` e o sistema de arquivos é criado no volume aberto `/dev/mapper/$CRYPT_NAME`. O tipo escolhido também é gravado no `/etc/fstab`. Se o volume já tiver o mesmo sistema de arquivos, o script o preserva; se encontrar um formato diferente, interrompe a etapa para evitar uma montagem incorreta. Se não encontrar um sistema de arquivos, cria o escolhido.
+
+**Atenção:** revise `RAID_DEVICES`, `RAID_DEVICE`, `RAID_FILESYSTEM`, `CRYPT_DEVICE` e as opções LUKS antes de executar. A criação do RAID apaga assinaturas dos discos selecionados após confirmação. A configuração LUKS e a criação do sistema de arquivos podem destruir dados existentes; mantenha backups. A etapa `--samba` substitui `/etc/samba/smb.conf`; guarda uma cópia inicial em `/etc/samba/smb.conf.orig` se ela ainda não existir.
 
 Exemplo para configurar o NAS completo depois de revisar os valores:
 
