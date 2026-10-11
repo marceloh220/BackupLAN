@@ -1,0 +1,4 @@
+smbprotocol>=1.10
+customtkinter>=5.2
+psutil>=5.9
+pyinstaller>=6.0
