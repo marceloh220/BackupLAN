@@ -318,7 +318,7 @@ class MetricRing(ctk.CTkFrame):
     def set_theme_colors(self, colors):
         self.configure(bg_color="transparent", fg_color=colors["panel"])
         self.canvas.configure(bg=colors["panel"])
-        self.canvas.itemconfigure(self.track_id, outline=colors["panel"])
+        self.canvas.itemconfigure(self.track_id, outline=colors["border"])
         self.canvas.itemconfigure(self.progress_id, outline=colors["accent"])
         self.canvas.itemconfigure(self.value_id, fill=colors["text"])
 
@@ -734,6 +734,8 @@ class App(ctk.CTk):
             disk_bar.configure(fg_color=colors["panel"], progress_color=colors["accent"])
         for filesystem_bar in getattr(self, "filesystem_progress_bars", []):
             filesystem_bar.configure(fg_color=colors["panel"], progress_color=colors["accent"])
+        for row_widgets in getattr(self, "filesystem_rows", {}).values():
+            row_widgets["bar_frame"].configure(border_color=colors["border"])
         self.style.configure(".", background=colors["background"], foreground=colors["text"])
         self.style.configure("TFrame", background=colors["background"])
         self.style.configure("TLabel", background=colors["background"], foreground=colors["text"])
@@ -1072,18 +1074,10 @@ class App(ctk.CTk):
         return b""
 
     def _read_ssh_output(self, generation, channel):
-        pending = bytearray()
-
-        def flush_pending():
-            if pending:
-                self.q.put(("ssh_data", (generation, bytes(pending))))
-                pending.clear()
-
         while not channel.closed:
             try:
                 output = channel.recv(32768)
             except socket.timeout:
-                flush_pending()
                 continue
             except Exception as error:
                 if not channel.closed:
@@ -1092,10 +1086,7 @@ class App(ctk.CTk):
                 break
             if not output:
                 break
-            pending.extend(output)
-            if len(pending) >= 32768:
-                flush_pending()
-        flush_pending()
+            self.q.put(("ssh_data", (generation, output)))
         self.ui(lambda: self._ssh_channel_closed(generation))
 
     def _feed_ssh_output(self, generation, data):
@@ -1437,7 +1428,7 @@ class App(ctk.CTk):
                 val()
         if self.ssh_screen_dirty:
             self._render_ssh_screen()
-        self.after(100, self._pump)
+        self.after(20 if self.ssh_channel else 100, self._pump)
 
     def ui(self, fn):
         self.q.put(("call", fn))
@@ -1609,29 +1600,51 @@ class App(ctk.CTk):
             if row_widgets is None:
                 row = ctk.CTkFrame(self.filesystem_bars_container, fg_color="transparent")
                 row.pack(fill="x", padx=2, pady=3)
-                name_label = ctk.CTkLabel(row, anchor="w", width=280)
-                name_label.pack(side="left", padx=(4, 8))
-                progress = ctk.CTkProgressBar(
+                for column, weight, minsize in (
+                    (0, 2, 220), (1, 2, 175), (2, 1, 110), (3, 0, 174), (4, 0, 210),
+                ):
+                    row.grid_columnconfigure(column, weight=weight, minsize=minsize)
+                mountpoint_label = ctk.CTkLabel(row, anchor="w")
+                mountpoint_label.grid(row=0, column=0, sticky="ew", padx=(4, 12))
+                device_label = ctk.CTkLabel(row, anchor="w")
+                device_label.grid(row=0, column=1, sticky="ew", padx=(0, 12))
+                filesystem_label = ctk.CTkLabel(row, anchor="w")
+                filesystem_label.grid(row=0, column=2, sticky="ew", padx=(0, 12))
+                bar_frame = ctk.CTkFrame(
                     row,
-                    height=12,
+                    width=174,
+                    height=18,
+                    fg_color="transparent",
+                    border_width=1,
+                    border_color=self.theme_colors["border"],
+                )
+                bar_frame.grid(row=0, column=3, sticky="w", padx=(0, 12))
+                bar_frame.grid_propagate(False)
+                progress = ctk.CTkProgressBar(
+                    bar_frame,
+                    width=162,
+                    height=10,
                     fg_color=self.theme_colors["panel"],
                     progress_color=self.theme_colors["accent"],
                 )
-                progress.pack(side="left", fill="x", expand=True, padx=4)
-                usage_label = ctk.CTkLabel(row, width=150, anchor="e")
-                usage_label.pack(side="right", padx=(8, 4))
+                progress.pack(fill="both", expand=True, padx=5, pady=3)
+                usage_label = ctk.CTkLabel(row, anchor="e")
+                usage_label.grid(row=0, column=4, sticky="e", padx=(0, 4))
                 row_widgets = {
                     "frame": row,
-                    "name": name_label,
+                    "mountpoint": mountpoint_label,
+                    "device": device_label,
+                    "filesystem": filesystem_label,
+                    "bar_frame": bar_frame,
                     "progress": progress,
                     "usage": usage_label,
                 }
                 self.filesystem_rows[mountpoint] = row_widgets
 
             percent = float(filesystem["percent"])
-            row_widgets["name"].configure(text=(
-                f"{mountpoint} · {filesystem['device']} · {filesystem['filesystem']}"
-            ))
+            row_widgets["mountpoint"].configure(text=mountpoint)
+            row_widgets["device"].configure(text=filesystem["device"])
+            row_widgets["filesystem"].configure(text=filesystem["filesystem"])
             row_widgets["progress"].set(max(0.0, min(1.0, percent / 100)))
             row_widgets["usage"].configure(text=(
                 f"{percent:.0f}% · {self._format_bytes(filesystem['free_bytes'])} livre"
