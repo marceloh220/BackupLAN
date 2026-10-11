@@ -1232,8 +1232,10 @@ class App(ctk.CTk):
     def _build_system_page(self, page):
         content = ctk.CTkScrollableFrame(page, fg_color="transparent")
         content.pack(fill="both", expand=True, padx=8, pady=4)
-        controls = ctk.CTkFrame(content, fg_color="transparent")
-        controls.pack(fill="x", padx=4, pady=4)
+        summary = self._section(content, "Resumo do servidor")
+        summary.pack(fill="x", padx=2, pady=(0, 4))
+        controls = ctk.CTkFrame(summary, fg_color="transparent")
+        controls.pack(fill="x", padx=8, pady=(0, 4))
         ctk.CTkLabel(controls, text="Atualizar a cada").pack(side="left", padx=(0, 4))
         self.status_interval_var = tk.StringVar(
             value=str(self.saved_settings.get("status_interval_seconds", 5)),
@@ -1258,9 +1260,9 @@ class App(ctk.CTk):
         self._accent_button(controls, text="Atualizar agora", command=self.refresh_server_status).pack(side="left", padx=4)
 
         self.server_overview = tk.StringVar(value="Aguardando autenticação.")
-        VariableLabel(content, self.server_overview).pack(anchor="w", padx=8, pady=(2, 6))
-        metrics = ctk.CTkFrame(content, fg_color="transparent")
-        metrics.pack(fill="x", padx=2)
+        VariableLabel(summary, self.server_overview).pack(anchor="w", padx=12, pady=(0, 6))
+        metrics = ctk.CTkFrame(summary, fg_color="transparent")
+        metrics.pack(fill="x", padx=8, pady=(0, 8))
         self.metric_rings = {
             "cpu": MetricRing(metrics, "CPU", THEME_PALETTE["panel"]),
             "memory": MetricRing(metrics, "Memória", THEME_PALETTE["panel"]),
