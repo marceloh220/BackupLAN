@@ -1336,11 +1336,19 @@ class App(ctk.CTk):
         identity_grid.columnconfigure(3, weight=1)
 
     def _build_disks_page(self, page):
+        content = ctk.CTkScrollableFrame(
+            page,
+            fg_color=THEME_PALETTE["background"],
+            scrollbar_fg_color=THEME_PALETTE["background"],
+            scrollbar_button_color=THEME_PALETTE["border"],
+            scrollbar_button_hover_color=THEME_PALETTE["accent"],
+        )
+        content.pack(fill="both", expand=True, padx=8, pady=4)
         self.disk_overview = tk.StringVar(value="Aguardando dados do servidor.")
-        VariableLabel(page, self.disk_overview).pack(anchor="w", padx=12, pady=(8, 4))
+        VariableLabel(content, self.disk_overview).pack(anchor="w", padx=12, pady=(8, 4))
 
-        storage = ctk.CTkFrame(page, fg_color="transparent")
-        storage.pack(fill="both", expand=True, padx=8, pady=4)
+        storage = ctk.CTkFrame(content, fg_color="transparent")
+        storage.pack(fill="x", padx=8, pady=4)
         filesystems = self._section(storage, "Sistemas de arquivos montados")
         filesystems.pack(fill="x", pady=(0, 4))
         self.filesystem_bars_container = ctk.CTkFrame(filesystems, fg_color="transparent")
@@ -1350,9 +1358,9 @@ class App(ctk.CTk):
         self.filesystem_empty_label = None
 
         physical_disks = self._section(storage, "Discos físicos e SMART")
-        physical_disks.pack(fill="both", expand=True, pady=(4, 0))
+        physical_disks.pack(fill="x", pady=(4, 0))
         self.physical_disk_grid = ctk.CTkFrame(physical_disks, fg_color="transparent")
-        self.physical_disk_grid.pack(fill="both", expand=True, padx=8, pady=(0, 8))
+        self.physical_disk_grid.pack(fill="x", padx=8, pady=(0, 8))
         for column, weight, minsize in (
             (0, 1, 150), (1, 3, 220), (2, 1, 150), (3, 1, 150), (4, 1, 140),
         ):
