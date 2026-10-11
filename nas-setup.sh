@@ -72,7 +72,7 @@ install_packages() {
   log "Instalando pacotes..."
   export DEBIAN_FRONTEND=noninteractive
   apt-get update -qq
-  apt-get install -y mdadm samba avahi-daemon ufw python3 e2fsprogs util-linux
+  apt-get install -y mdadm samba avahi-daemon ufw python3 python3-psutil smartmontools pciutils fontconfig e2fsprogs util-linux
   [[ -n "$CRYPT_DEVICE" ]] && apt-get install -y cryptsetup
   # No Debian 13+ o gerador do crypttab fica em pacote separado; em versões antigas ele não existe.
   [[ -n "$CRYPT_DEVICE" ]] && { apt-get install -y systemd-cryptsetup || true; }

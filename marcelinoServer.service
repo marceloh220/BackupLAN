@@ -8,9 +8,13 @@ Type=simple
 User=root
 EnvironmentFile=/etc/default/marcelinoServer
 ExecStart=/usr/bin/python3 ${MARCELINOSRV_SCRIPT} --output ${MARCELINOSRV_STATUS} --interval ${MARCELINOSRV_INTERVAL} --file-mode ${MARCELINOSRV_FILE_MODE}
+Restart=on-failure
 RestartSec=5
 KillSignal=SIGINT
 TimeoutStopSec=15
 UMask=0022
 NoNewPrivileges=true
 ProtectSystem=full
+
+[Install]
+WantedBy=multi-user.target
