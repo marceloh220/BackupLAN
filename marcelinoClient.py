@@ -573,6 +573,15 @@ class App(ctk.CTk):
         if isinstance(ssh_key_path, str):
             self.ssh_key_path.set(ssh_key_path)
 
+        saved_status_interval = self.saved_settings.get("status_interval_seconds", 5)
+        try:
+            saved_status_interval = int(saved_status_interval)
+        except (TypeError, ValueError):
+            saved_status_interval = 5
+        if saved_status_interval not in (1, 5, 10, 20, 30, 60, 120, 300):
+            saved_status_interval = 5
+        self.status_interval_var.set(str(saved_status_interval))
+
         server = self.saved_settings.get("server")
         if isinstance(server, dict):
             selection = server.get("selection")
@@ -617,6 +626,7 @@ class App(ctk.CTk):
             "destination": destination,
             "theme": self.theme,
             "ssh_key_path": self.ssh_key_path.get().strip(),
+            "status_interval_seconds": self._status_interval_seconds(),
         }
         temp_path = None
         try:
@@ -1254,7 +1264,11 @@ class App(ctk.CTk):
         controls = ctk.CTkFrame(content, fg_color="transparent")
         controls.pack(fill="x", padx=4, pady=4)
         ctk.CTkLabel(controls, text="Atualizar a cada").pack(side="left", padx=(0, 4))
-        self.status_interval_var = tk.StringVar(value="5")
+        self.status_interval_var = tk.StringVar(
+            value=str(self.saved_settings.get("status_interval_seconds", 5)),
+        )
+        if self.status_interval_var.get() not in {"1", "5", "10", "20", "30", "60", "120", "300"}:
+            self.status_interval_var.set("5")
         ctk.CTkOptionMenu(
             controls,
             values=["1", "5", "10", "20", "30", "60", "120", "300"],
@@ -1638,8 +1652,8 @@ class App(ctk.CTk):
             self.samba_share_status.set("Nenhum compartilhamento Samba publicado pelo servidor.")
             return
 
-        def rule(value):
-            return str(value).strip() or "Não especificado"
+        def rule(value, default):
+            return str(value).strip() or default
 
         def yes_no(value):
             value = str(value).strip().casefold()
@@ -1653,11 +1667,11 @@ class App(ctk.CTk):
             self.samba_share_tree.insert("", "end", values=(
                 share.get("name", "--"),
                 share.get("path") or "--",
-                rule(share.get("valid_users")),
-                rule(share.get("read_list")),
-                rule(share.get("write_list")),
-                rule(share.get("admin_users")),
-                rule(share.get("invalid_users")),
+                rule(share.get("valid_users"), "Sem restrição por lista (padrão Samba)"),
+                rule(share.get("read_list"), "Ninguém (padrão Samba)"),
+                rule(share.get("write_list"), "Ninguém (padrão Samba)"),
+                rule(share.get("admin_users"), "Ninguém (padrão Samba)"),
+                rule(share.get("invalid_users"), "Ninguém (padrão Samba)"),
                 yes_no(share.get("guest_ok")),
                 yes_no(share.get("read_only")),
             ))
@@ -1669,11 +1683,10 @@ class App(ctk.CTk):
 
     def _status_interval_changed(self, _value=None):
         self._cancel_server_status_timer()
+        self._save_settings()
         if self.authenticated and self.remote and self.status_share:
-            self.status_after_id = self.after(
-                self._status_interval_ms(),
-                lambda: self._request_server_status(self.status_generation),
-            )
+            if self.status_polling_generation != self.status_generation:
+                self._schedule_server_status_poll(self.status_generation)
 
     def _cancel_server_status_timer(self):
         if self.status_after_id is not None:
@@ -1684,11 +1697,29 @@ class App(ctk.CTk):
             self.status_after_id = None
 
     def _status_interval_ms(self):
+        return self._status_interval_seconds() * 1000
+
+    def _status_interval_seconds(self):
         try:
             seconds = int(self.status_interval_var.get())
         except (AttributeError, tk.TclError, ValueError):
             seconds = 5
-        return max(1, min(300, seconds)) * 1000
+        return max(1, min(300, seconds))
+
+    def _schedule_server_status_poll(self, generation):
+        if (
+            generation != self.status_generation
+            or not self.authenticated
+            or not self.remote
+            or not self.status_share
+            or self.status_polling_generation == generation
+        ):
+            return
+        self._cancel_server_status_timer()
+        self.status_after_id = self.after(
+            self._status_interval_ms(),
+            lambda: self._request_server_status(generation),
+        )
 
     def _request_server_status(self, generation):
         if generation != self.status_generation or not self.authenticated or not self.remote:
@@ -1729,11 +1760,7 @@ class App(ctk.CTk):
             )
         else:
             self._render_server_status(data)
-        self._cancel_server_status_timer()
-        self.status_after_id = self.after(
-            self._status_interval_ms(),
-            lambda: self._request_server_status(generation),
-        )
+        self._schedule_server_status_poll(generation)
 
     def _render_server_status(self, data):
         try:
