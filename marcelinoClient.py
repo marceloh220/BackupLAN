@@ -12,13 +12,38 @@ from tkinter import filedialog, messagebox, ttk
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 import shutil
 import tempfile
+import pystray
 from types import SimpleNamespace
 from pathlib import Path
 
 import smbclient
+from PIL import Image, ImageDraw
 
 SMB_PORT = 445
 STATUS_FILENAME = ".marcelinoSrv.json"
+MUTEX_NAME = "Local\\MarcelinoClientSingleInstance"
+
+
+def acquire_single_instance():
+    """Retorna um handle a manter vivo, ou None se já houver outra instância."""
+    if os.name == "nt":
+        import ctypes
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.CreateMutexW.restype = ctypes.c_void_p
+        handle = kernel32.CreateMutexW(None, False, MUTEX_NAME)
+        if ctypes.get_last_error() == 183:  # ERROR_ALREADY_EXISTS
+            return None
+        return handle
+    import fcntl
+
+    lock_file = open(Path(tempfile.gettempdir()) / f"marcelinoClient.{os.getuid()}.lock", "w")
+    try:
+        fcntl.flock(lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        lock_file.close()
+        return None
+    return lock_file
 
 
 def local_ip():
@@ -307,6 +332,10 @@ class App(ctk.CTk):
         super().__init__()
         self.title("marcelino Client")
         self.geometry("1000x650")
+        self._tray_icon = None
+        self._closing = False
+        self.protocol("WM_DELETE_WINDOW", self.minimize_to_tray)
+        self.bind("<Unmap>", self._on_minimize)
         self.settings_path = self._settings_path()
         self.saved_settings = self._read_settings()
         self.theme = "light"
@@ -341,7 +370,99 @@ class App(ctk.CTk):
         self._build()
         self._apply_theme(self.saved_settings.get("theme", "light"))
         self._restore_backup_settings()
+        self._start_tray_icon()
         self.after(100, self._pump)
+
+    def _start_tray_icon(self):
+        image = Image.new("RGB", (64, 64), "#14343e")
+        draw = ImageDraw.Draw(image)
+        draw.rectangle((10, 13, 54, 51), fill="#ffffff")
+        for y in (17, 28, 39):
+            draw.rectangle((15, y, 49, y + 7), fill="#167b88")
+            draw.ellipse((18, y + 2, 22, y + 6), fill="#5abe82")
+        menu = pystray.Menu(
+            pystray.MenuItem(
+                "Alternar janela",
+                lambda icon, item: self._schedule_ui(self.toggle_window),
+                default=True,
+                visible=False,
+            ),
+            pystray.MenuItem("Restaurar", lambda icon, item: self._schedule_ui(self.restore_window)),
+            pystray.MenuItem("Desconectar", lambda icon, item: self._schedule_ui(self.disconnect)),
+            pystray.MenuItem("Fechar", lambda icon, item: self._schedule_ui(self.close_application)),
+        )
+        self._tray_icon = pystray.Icon("marcelino_client", image, "marcelino Client", menu)
+        threading.Thread(target=self._run_tray_icon, daemon=True).start()
+
+    def _run_tray_icon(self):
+        try:
+            self._tray_icon.run()
+        except Exception as error:
+            if not self._closing:
+                self.say(f"Não foi possível iniciar o ícone da bandeja: {error}")
+
+    def _schedule_ui(self, callback):
+        if self._closing:
+            return
+        try:
+            self.after(0, callback)
+        except tk.TclError:
+            pass
+
+    def _on_minimize(self, event):
+        if event.widget is self and self.state() == "iconic":
+            self.after_idle(self.minimize_to_tray)
+
+    def minimize_to_tray(self):
+        if not self._closing:
+            self.withdraw()
+
+    def restore_window(self):
+        if not self._closing:
+            self.deiconify()
+            self.state("normal")
+            self.lift()
+            self.focus_force()
+
+    def toggle_window(self):
+        if self.state() in ("iconic", "withdrawn"):
+            self.restore_window()
+        else:
+            self.minimize_to_tray()
+
+    def disconnect(self):
+        remote = self.remote
+        self.status_generation += 1
+        self._cancel_server_status_timer()
+        self.status_polling_generation = None
+        self.status_share = None
+        self.authenticated = False
+        self.authenticated_user = None
+        self.remote = None
+        self.share, self.path = None, ""
+        self.cancel.set()
+        self.pwd.set("")
+        self.auth_summary.set("Não autenticado")
+        self.login_status.set("Desconectado.")
+        self._fill([])
+        self._reset_server_dashboard("Aguardando autenticação.")
+        self.show_login_form()
+        if remote is not None:
+            try:
+                smbclient.delete_session(remote.host)
+            except Exception as error:
+                self.say(f"Não foi possível encerrar a sessão SMB: {error}")
+        self.say("Desconectado do servidor.")
+
+    def close_application(self):
+        if self._closing:
+            return
+        self._closing = True
+        self.cancel.set()
+        self._cancel_server_status_timer()
+        if self._tray_icon is not None:
+            self._tray_icon.stop()
+        self.destroy()
 
     @staticmethod
     def _settings_path():
@@ -1504,4 +1625,11 @@ class App(ctk.CTk):
 
 
 if __name__ == "__main__":
-    App().mainloop()
+    instance_lock = acquire_single_instance()
+    if instance_lock is None:
+        root = tk.Tk()
+        root.withdraw()
+        messagebox.showinfo("marcelino Client", "O aplicativo já está aberto.")
+        root.destroy()
+    else:
+        App().mainloop()
