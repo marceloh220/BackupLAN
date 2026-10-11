@@ -17,7 +17,7 @@ import psutil
 
 STATUS_FILENAME = ".marcelinoSrv.json"
 DEFAULT_FILE_MODE = 0o644
-SMART_REFRESH_SECONDS = 20 * 60
+SMART_REFRESH_SECONDS = 60 * 60
 SYSTEM_INFO_REFRESH_SECONDS = 15 * 60
 _smart_cache = None
 _smart_cache_expires_at = 0.0

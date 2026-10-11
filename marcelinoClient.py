@@ -28,6 +28,19 @@ SMB_PORT = 445
 STATUS_FILENAME = ".marcelinoSrv.json"
 PUBLIC_SHARE_NAMES = {"public", "publico", "público"}
 MUTEX_NAME = "Local\\MarcelinoClientSingleInstance"
+THEME_PALETTE = {
+    "background": ("#f2f5f7", "#171d22"),
+    "surface": ("#ffffff", "#222b32"),
+    "panel": ("#e8eef2", "#2b363e"),
+    "input": ("#ffffff", "#12171b"),
+    "text": ("#1d2a32", "#edf2f5"),
+    "muted": ("#53636d", "#a8b6bf"),
+    "border": ("#c5d0d7", "#46545e"),
+    "accent": ("#167b88", "#3d9b8b"),
+    "hover": ("#d6e7ea", "#356f67"),
+    "accent_hover": ("#0f6872", "#356f67"),
+    "selected_text": ("#ffffff", "#ffffff"),
+}
 
 
 def find_public_share(shares):
@@ -400,14 +413,7 @@ class App(ctk.CTk):
         self.saved_server = None
         self.tabs = {}
         self.active_tab = None
-        self.theme_colors = {
-            "background": "#f2f5f7",
-            "panel": "#e8eef2",
-            "accent": "#167b88",
-            "hover": "#d6e7ea",
-            "text": "#1d2a32",
-            "selected_text": "#ffffff",
-        }
+        self.theme_colors = {key: value[0] for key, value in THEME_PALETTE.items()}
         self._build()
         self._apply_theme(self.saved_settings.get("theme", "light"))
         self._restore_backup_settings()
@@ -680,7 +686,7 @@ class App(ctk.CTk):
 
         self.tab_bar = ctk.CTkFrame(self.main_page, fg_color="transparent")
         self.tab_bar.pack(fill="x", padx=8, pady=(8, 0))
-        ctk.CTkFrame(self.main_page, height=1, fg_color=("#c5d0d7", "#46545e")).pack(
+        ctk.CTkFrame(self.main_page, height=1, fg_color=THEME_PALETTE["border"]).pack(
             fill="x", padx=8, pady=(4, 6),
         )
         self.tab_container = ctk.CTkFrame(self.main_page, fg_color="transparent")
@@ -697,34 +703,9 @@ class App(ctk.CTk):
             theme = "light"
         self.theme = theme
         ctk.set_appearance_mode(theme)
-        if theme == "dark":
-            colors = {
-                "background": "#171d22",
-                "surface": "#222b32",
-                "panel": "#2b363e",
-                "input": "#12171b",
-                "text": "#edf2f5",
-                "muted": "#a8b6bf",
-                "border": "#46545e",
-                "accent": "#3d9b8b",
-                "hover": "#356f67",
-                "selected_text": "#ffffff",
-            }
-            self.theme_button.configure(text="☀ Claro")
-        else:
-            colors = {
-                "background": "#f2f5f7",
-                "surface": "#ffffff",
-                "panel": "#e8eef2",
-                "input": "#ffffff",
-                "text": "#1d2a32",
-                "muted": "#53636d",
-                "border": "#c5d0d7",
-                "accent": "#167b88",
-                "hover": "#d6e7ea",
-                "selected_text": "#ffffff",
-            }
-            self.theme_button.configure(text="☾ Escuro")
+        theme_index = 1 if theme == "dark" else 0
+        colors = {key: value[theme_index] for key, value in THEME_PALETTE.items()}
+        self.theme_button.configure(text="☀ Claro" if theme == "dark" else "☾ Escuro")
 
         self.theme_colors = colors
         self.configure(fg_color=colors["background"])
@@ -837,19 +818,18 @@ class App(ctk.CTk):
         self.tabs[title]["page"].pack(fill="both", expand=True)
 
     def _section(self, parent, title, **kwargs):
-        kwargs.setdefault("fg_color", ("#e8eef2", "#2b363e"))
+        kwargs.setdefault("fg_color", THEME_PALETTE["panel"])
         section = ctk.CTkFrame(parent, corner_radius=8, **kwargs)
         ctk.CTkLabel(
             section, text=title, font=ctk.CTkFont(size=14, weight="bold"),
         ).pack(anchor="w", padx=12, pady=(8, 2))
         return section
 
-    @staticmethod
-    def _accent_button(master, **kwargs):
-        kwargs.setdefault("fg_color", ("#167b88", "#3d9b8b"))
-        kwargs.setdefault("hover_color", ("#0f6872", "#356f67"))
-        kwargs.setdefault("text_color", "#ffffff")
-        kwargs.setdefault("border_color", ("#167b88", "#3d9b8b"))
+    def _accent_button(self, master, **kwargs):
+        kwargs.setdefault("fg_color", THEME_PALETTE["accent"])
+        kwargs.setdefault("hover_color", THEME_PALETTE["accent_hover"])
+        kwargs.setdefault("text_color", THEME_PALETTE["selected_text"])
+        kwargs.setdefault("border_color", THEME_PALETTE["accent"])
         return ctk.CTkButton(master, **kwargs)
 
     def _build_backup_page(self, page):
@@ -1212,14 +1192,14 @@ class App(ctk.CTk):
             values=[],
             width=240,
             state="readonly",
-            fg_color=("#ffffff", "#12171b"),
-            text_color=("#1d2a32", "#edf2f5"),
-            text_color_disabled=("#53636d", "#a8b6bf"),
-            button_color=("#167b88", "#3d9b8b"),
-            button_hover_color=("#0f6872", "#356f67"),
-            dropdown_fg_color=("#e8eef2", "#2b363e"),
-            dropdown_hover_color=("#167b88", "#3d9b8b"),
-            dropdown_text_color=("#1d2a32", "#edf2f5"),
+            fg_color=THEME_PALETTE["input"],
+            text_color=THEME_PALETTE["text"],
+            text_color_disabled=THEME_PALETTE["muted"],
+            button_color=THEME_PALETTE["accent"],
+            button_hover_color=THEME_PALETTE["accent_hover"],
+            dropdown_fg_color=THEME_PALETTE["panel"],
+            dropdown_hover_color=THEME_PALETTE["accent"],
+            dropdown_text_color=THEME_PALETTE["text"],
         )
         ctk.CTkLabel(login, text="Servidor").grid(row=1, column=0, padx=8, pady=6, sticky="e")
         self.host_cb.grid(row=1, column=1, padx=4, pady=6)
@@ -1231,14 +1211,14 @@ class App(ctk.CTk):
         ctk.CTkLabel(login, text="Usuário").grid(row=2, column=0, padx=8, pady=6, sticky="e")
         ctk.CTkEntry(
             login, textvariable=self.user, width=220,
-            text_color=("#1d2a32", "#edf2f5"),
-            placeholder_text_color=("#53636d", "#a8b6bf"),
+            text_color=THEME_PALETTE["text"],
+            placeholder_text_color=THEME_PALETTE["muted"],
         ).grid(row=2, column=1, padx=4, pady=6)
         ctk.CTkLabel(login, text="Senha").grid(row=2, column=2, padx=4, pady=6, sticky="e")
         password_entry = ctk.CTkEntry(
             login, textvariable=self.pwd, show="*", width=220,
-            text_color=("#1d2a32", "#edf2f5"),
-            placeholder_text_color=("#53636d", "#a8b6bf"),
+            text_color=THEME_PALETTE["text"],
+            placeholder_text_color=THEME_PALETTE["muted"],
         )
         password_entry.grid(row=2, column=3, padx=4, pady=6)
         password_entry.bind("<Return>", self._login_on_enter)
@@ -1265,13 +1245,13 @@ class App(ctk.CTk):
             values=["1", "5", "10", "20", "30", "60", "120", "300"],
             variable=self.status_interval_var,
             width=90,
-            fg_color=("#167b88", "#3d9b8b"),
-            button_color=("#167b88", "#3d9b8b"),
-            button_hover_color=("#0f6872", "#356f67"),
-            text_color="#ffffff",
-            dropdown_fg_color=("#e8eef2", "#2b363e"),
-            dropdown_hover_color=("#167b88", "#3d9b8b"),
-            dropdown_text_color=("#1d2a32", "#edf2f5"),
+            fg_color=THEME_PALETTE["accent"],
+            button_color=THEME_PALETTE["accent"],
+            button_hover_color=THEME_PALETTE["accent_hover"],
+            text_color=THEME_PALETTE["selected_text"],
+            dropdown_fg_color=THEME_PALETTE["panel"],
+            dropdown_hover_color=THEME_PALETTE["accent"],
+            dropdown_text_color=THEME_PALETTE["text"],
             command=self._status_interval_changed,
         ).pack(side="left", padx=4)
         ctk.CTkLabel(controls, text="segundos").pack(side="left", padx=(0, 8))
@@ -1282,8 +1262,8 @@ class App(ctk.CTk):
         metrics = ctk.CTkFrame(content, fg_color="transparent")
         metrics.pack(fill="x", padx=2)
         self.metric_rings = {
-            "cpu": MetricRing(metrics, "CPU", ("#e8eef2", "#2b363e")),
-            "memory": MetricRing(metrics, "Memória", ("#e8eef2", "#2b363e")),
+            "cpu": MetricRing(metrics, "CPU", THEME_PALETTE["panel"]),
+            "memory": MetricRing(metrics, "Memória", THEME_PALETTE["panel"]),
         }
         self.metric_rings["cpu"].grid(row=0, column=0, sticky="nsew", padx=3, pady=3)
         self.metric_rings["memory"].grid(row=0, column=1, sticky="nsew", padx=3, pady=3)
@@ -1346,59 +1326,63 @@ class App(ctk.CTk):
 
         physical_disks = self._section(storage, "Discos físicos e SMART")
         physical_disks.pack(fill="both", expand=True, pady=(4, 0))
-        self.physical_disk_tree = ttk.Treeview(
-            physical_disks,
-            columns=("device", "model", "capacity", "temperature", "smart"),
-            show="headings",
-            height=4,
-        )
-        for column, title, width in (
-            ("device", "Dispositivo", 180),
-            ("model", "Modelo", 250),
-            ("capacity", "Capacidade", 120),
-            ("temperature", "Temperatura", 120),
-            ("smart", "SMART", 120),
+        self.physical_disk_grid = ctk.CTkFrame(physical_disks, fg_color="transparent")
+        self.physical_disk_grid.pack(fill="both", expand=True, padx=8, pady=(0, 8))
+        for column, weight, minsize in (
+            (0, 1, 150), (1, 3, 220), (2, 1, 150), (3, 1, 150), (4, 1, 140),
         ):
-            self.physical_disk_tree.heading(column, text=title)
-            self.physical_disk_tree.column(column, width=width, anchor="w")
-        self.physical_disk_tree.pack(fill="both", expand=True, padx=8, pady=(0, 8))
+            self.physical_disk_grid.grid_columnconfigure(column, weight=weight, minsize=minsize)
+        for column, title in enumerate(("Dispositivo", "Modelo", "Capacidade", "Temperatura", "SMART")):
+            ctk.CTkLabel(
+                self.physical_disk_grid,
+                text=title,
+                anchor="w",
+                text_color=THEME_PALETTE["muted"],
+            ).grid(row=0, column=column, sticky="ew", padx=(4, 12), pady=(0, 4))
+        self.physical_disk_rows = {}
+        self.physical_disk_empty_label = None
         self.storage_status = tk.StringVar(value="Aguardando métricas de armazenamento.")
         VariableLabel(storage, self.storage_status).pack(anchor="w", padx=8, pady=(4, 2))
 
     def _build_shares_page(self, page):
+        self.samba_share_panel = self._section(page, "Compartilhamentos Samba")
+        self.samba_share_panel.pack(fill="both", expand=True, padx=8, pady=4)
         self.samba_share_status = tk.StringVar(value="Aguardando dados do servidor.")
-        VariableLabel(page, self.samba_share_status).pack(anchor="w", padx=12, pady=(8, 4))
-        table = ctk.CTkFrame(page, fg_color="transparent")
-        table.pack(fill="both", expand=True, padx=8, pady=4)
-        columns = (
-            "share", "path", "valid_users", "read_list", "write_list",
-            "admin_users", "invalid_users", "guest_ok", "read_only",
+        VariableLabel(self.samba_share_panel, self.samba_share_status).pack(
+            anchor="w", padx=12, pady=(2, 4),
         )
-        self.samba_share_tree = ttk.Treeview(table, columns=columns, show="headings")
-        headings = (
-            ("share", "Compartilhamento", 150),
-            ("path", "Caminho", 220),
-            ("valid_users", "Usuários/grupos permitidos", 230),
-            ("read_list", "Somente leitura", 180),
-            ("write_list", "Leitura e escrita", 180),
-            ("admin_users", "Administradores", 180),
-            ("invalid_users", "Bloqueados", 180),
-            ("guest_ok", "Convidados", 100),
-            ("read_only", "Share somente leitura", 150),
+        self.samba_share_grid = ctk.CTkFrame(self.samba_share_panel, fg_color="transparent")
+        self.samba_share_grid.pack(fill="both", expand=True, padx=8, pady=(0, 8))
+        self.samba_share_column_specs = (
+            (1, 150), (2, 220), (3, 260), (1, 170), (2, 220),
         )
-        for column, heading, width in headings:
-            self.samba_share_tree.heading(column, text=heading)
-            self.samba_share_tree.column(column, width=width, minwidth=90, anchor="w")
-        vertical_scroll = ttk.Scrollbar(table, orient="vertical", command=self.samba_share_tree.yview)
-        horizontal_scroll = ttk.Scrollbar(table, orient="horizontal", command=self.samba_share_tree.xview)
-        self.samba_share_tree.configure(
-            yscrollcommand=vertical_scroll.set, xscrollcommand=horizontal_scroll.set,
+        self.samba_share_header = ctk.CTkFrame(
+            self.samba_share_grid, fg_color="transparent",
         )
-        self.samba_share_tree.grid(row=0, column=0, sticky="nsew")
-        vertical_scroll.grid(row=0, column=1, sticky="ns")
-        horizontal_scroll.grid(row=1, column=0, sticky="ew")
-        table.grid_rowconfigure(0, weight=1)
-        table.grid_columnconfigure(0, weight=1)
+        self.samba_share_header.pack(fill="x", padx=8)
+        self.samba_share_rows_container = ctk.CTkScrollableFrame(
+            self.samba_share_grid, fg_color="transparent", corner_radius=0,
+        )
+        self.samba_share_rows_container.pack(fill="both", expand=True, padx=8, pady=(0, 8))
+        for column, (weight, minsize) in enumerate(self.samba_share_column_specs):
+            self.samba_share_header.grid_columnconfigure(
+                column, weight=weight, minsize=minsize,
+            )
+            self.samba_share_rows_container.grid_columnconfigure(
+                column, weight=weight, minsize=minsize,
+            )
+        for column, title in enumerate((
+            "Compartilhamento", "Caminho", "Usuários/grupos permitidos",
+            "Somente leitura", "Leitura e escrita",
+        )):
+            ctk.CTkLabel(
+                self.samba_share_header,
+                text=title,
+                anchor="w",
+                text_color=THEME_PALETTE["muted"],
+            ).grid(row=0, column=column, sticky="ew", padx=(4, 12), pady=(0, 4))
+        self.samba_share_rows = {}
+        self.samba_share_empty_label = None
 
     # ---- util
     def say(self, msg):
@@ -1571,9 +1555,7 @@ class App(ctk.CTk):
             ring.set_value(None, message, self.theme_colors)
         self._render_system_filesystems([])
         self._render_samba_shares([])
-        for tree in (self.physical_disk_tree, self.samba_share_tree):
-            for row in tree.get_children():
-                tree.delete(row)
+        self._render_physical_disks([])
 
     def _render_system_filesystems(self, filesystems):
         current_mounts = {
@@ -1591,7 +1573,7 @@ class App(ctk.CTk):
             self.filesystem_empty_label = ctk.CTkLabel(
                 self.filesystem_bars_container,
                 text="Nenhum sistema de arquivos local disponível.",
-                text_color=("#53636d", "#a8b6bf"),
+                text_color=THEME_PALETTE["muted"],
             )
             self.filesystem_empty_label.pack(anchor="w", padx=4, pady=4)
             return
@@ -1653,17 +1635,109 @@ class App(ctk.CTk):
             row_widgets["progress"] for row_widgets in self.filesystem_rows.values()
         ]
 
+    def _render_physical_disks(self, disks):
+        current_disks = {
+            disk.get("name", str(index)): disk for index, disk in enumerate(disks)
+        }
+        for device in set(self.physical_disk_rows) - set(current_disks):
+            row_widgets = self.physical_disk_rows.pop(device)
+            for label in row_widgets["labels"]:
+                label.destroy()
+            row_widgets["divider"].destroy()
+
+        if not current_disks:
+            if self.physical_disk_empty_label is None:
+                self.physical_disk_empty_label = ctk.CTkLabel(
+                    self.physical_disk_grid,
+                    text="Nenhum disco físico disponível.",
+                    anchor="w",
+                    text_color=THEME_PALETTE["muted"],
+                )
+                self.physical_disk_empty_label.grid(
+                    row=1, column=0, columnspan=5, sticky="ew", padx=4, pady=4,
+                )
+            return
+        if self.physical_disk_empty_label is not None:
+            self.physical_disk_empty_label.destroy()
+            self.physical_disk_empty_label = None
+
+        for index, (device, disk) in enumerate(current_disks.items()):
+            row = index * 2 + 1
+            temperature = disk.get("temperature_c")
+            values = (
+                disk["name"],
+                disk.get("model") or "--",
+                self._format_bytes(disk["capacity_bytes"]) if disk["capacity_bytes"] else "--",
+                f"{temperature} °C" if temperature is not None else "Indisponível",
+                disk["smart_status"],
+            )
+            row_widgets = self.physical_disk_rows.get(device)
+            if row_widgets is None:
+                labels = [
+                    ctk.CTkLabel(self.physical_disk_grid, text="", anchor="w")
+                    for _ in values
+                ]
+                divider = ctk.CTkFrame(
+                    self.physical_disk_grid,
+                    height=1,
+                    fg_color=THEME_PALETTE["border"],
+                )
+                row_widgets = {"labels": labels, "divider": divider}
+                self.physical_disk_rows[device] = row_widgets
+            for column, (label, value) in enumerate(zip(row_widgets["labels"], values)):
+                if label.cget("text") != value:
+                    label.configure(text=value)
+                label.grid(row=row, column=column, sticky="ew", padx=(4, 12), pady=5)
+            if index < len(disks) - 1:
+                row_widgets["divider"].grid(
+                    row=row + 1, column=0, columnspan=5, sticky="ew", padx=4,
+                )
+            else:
+                row_widgets["divider"].grid_remove()
+
     def _render_samba_shares(self, shares):
-        for row in self.samba_share_tree.get_children():
-            self.samba_share_tree.delete(row)
         if shares is None:
+            current_shares = {}
             self.samba_share_status.set(
                 "Atualize o agente do servidor para publicar as permissões dos compartilhamentos."
             )
-            return
-        if not shares:
+            empty_message = "Permissões Samba indisponíveis."
+        elif not shares:
+            current_shares = {}
             self.samba_share_status.set("Nenhum compartilhamento Samba publicado pelo servidor.")
+            empty_message = "Nenhum compartilhamento Samba disponível."
+        else:
+            current_shares = {
+                share.get("name", "--"): share
+                for share in sorted(shares, key=lambda item: item.get("name", "").casefold())
+            }
+            self.samba_share_status.set(
+                f"{len(shares)} compartilhamentos configurados no Samba."
+            )
+
+        for name in set(self.samba_share_rows) - set(current_shares):
+            row_widgets = self.samba_share_rows.pop(name)
+            for label in row_widgets["labels"]:
+                label.destroy()
+            row_widgets["divider"].destroy()
+
+        if not current_shares:
+            if self.samba_share_empty_label is None:
+                self.samba_share_empty_label = ctk.CTkLabel(
+                    self.samba_share_rows_container,
+                    text=empty_message,
+                    anchor="w",
+                    text_color=THEME_PALETTE["muted"],
+                )
+                self.samba_share_empty_label.grid(
+                    row=0, column=0, columnspan=5, sticky="ew", padx=4, pady=4,
+                )
+            elif self.samba_share_empty_label.cget("text") != empty_message:
+                self.samba_share_empty_label.configure(text=empty_message)
             return
+        if self.samba_share_empty_label is not None:
+            self.samba_share_empty_label.destroy()
+            self.samba_share_empty_label = None
 
         def rule(value, default):
             return str(value).strip() or default
@@ -1676,19 +1750,56 @@ class App(ctk.CTk):
                 return "Não"
             return "Padrão Samba"
 
-        for share in sorted(shares, key=lambda item: item.get("name", "").casefold()):
-            self.samba_share_tree.insert("", "end", values=(
+        for index, (name, share) in enumerate(current_shares.items()):
+            guest_allowed = str(share.get("guest_ok", "")).strip().casefold() in (
+                "yes", "true", "1",
+            )
+            read_only = yes_no(share.get("read_only"))
+            write_list = str(share.get("write_list") or "").strip()
+            if read_only == "Não":
+                write_access = "Todos"
+            elif read_only == "Sim" and not write_list:
+                write_access = "Ninguém"
+            else:
+                write_access = rule(write_list, "Ninguém (padrão Samba)")
+            values = (
                 share.get("name", "--"),
                 share.get("path") or "--",
-                rule(share.get("valid_users"), "Sem restrição por lista (padrão Samba)"),
-                rule(share.get("read_list"), "Ninguém (padrão Samba)"),
-                rule(share.get("write_list"), "Ninguém (padrão Samba)"),
-                rule(share.get("admin_users"), "Ninguém (padrão Samba)"),
-                rule(share.get("invalid_users"), "Ninguém (padrão Samba)"),
-                yes_no(share.get("guest_ok")),
-                yes_no(share.get("read_only")),
-            ))
-        self.samba_share_status.set(f"{len(shares)} compartilhamentos configurados no Samba.")
+                "guest" if guest_allowed else rule(
+                    share.get("valid_users"), "Sem restrição por lista (padrão Samba)"
+                ),
+                read_only,
+                write_access,
+            )
+            row = index * 2
+            row_widgets = self.samba_share_rows.get(name)
+            if row_widgets is None:
+                labels = [
+                    ctk.CTkLabel(
+                        self.samba_share_rows_container,
+                        text="",
+                        anchor="w",
+                        wraplength=self.samba_share_column_specs[column][1],
+                    )
+                    for column in range(len(values))
+                ]
+                divider = ctk.CTkFrame(
+                    self.samba_share_rows_container,
+                    height=1,
+                    fg_color=THEME_PALETTE["border"],
+                )
+                row_widgets = {"labels": labels, "divider": divider}
+                self.samba_share_rows[name] = row_widgets
+            for column, (label, value) in enumerate(zip(row_widgets["labels"], values)):
+                if label.cget("text") != value:
+                    label.configure(text=value)
+                label.grid(row=row, column=column, sticky="ew", padx=(4, 12), pady=5)
+            if index < len(current_shares) - 1:
+                row_widgets["divider"].grid(
+                    row=row + 1, column=0, columnspan=5, sticky="ew", padx=4,
+                )
+            else:
+                row_widgets["divider"].grid_remove()
 
     def refresh_server_status(self, _event=None):
         self._cancel_server_status_timer()
@@ -1829,17 +1940,7 @@ class App(ctk.CTk):
             self.disk_overview.set(overview)
             self._render_system_filesystems(data.get("filesystems", []))
             self._render_samba_shares(data.get("samba_shares"))
-            for row in self.physical_disk_tree.get_children():
-                self.physical_disk_tree.delete(row)
-            for disk in data["physical_disks"]:
-                temperature = disk.get("temperature_c")
-                self.physical_disk_tree.insert("", "end", values=(
-                    disk["name"],
-                    disk.get("model") or "--",
-                    self._format_bytes(disk["capacity_bytes"]) if disk["capacity_bytes"] else "--",
-                    f"{temperature} °C" if temperature is not None else "Indisponível",
-                    disk["smart_status"],
-                ))
+            self._render_physical_disks(data["physical_disks"])
             status_notes = []
             if data.get("share_discovery_error"):
                 status_notes.append(data["share_discovery_error"])
