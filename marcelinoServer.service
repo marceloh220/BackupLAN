@@ -6,13 +6,8 @@ After=network-online.target smbd.service
 [Service]
 Type=simple
 User=root
-Environment=MARCELINOSRV_SCRIPT=/opt/marcelinoServer/marcelinoServer.py
-Environment=MARCELINOSRV_STATUS=/srv/marcelo/.marcelinoSrv.json
-Environment=MARCELINOSRV_INTERVAL=5
-Environment=MARCELINOSRV_FILE_MODE=0644
-EnvironmentFile=-/etc/default/marcelinoServer
+EnvironmentFile=/etc/default/marcelinoServer
 ExecStart=/usr/bin/python3 ${MARCELINOSRV_SCRIPT} --output ${MARCELINOSRV_STATUS} --interval ${MARCELINOSRV_INTERVAL} --file-mode ${MARCELINOSRV_FILE_MODE}
-Restart=on-failure
 RestartSec=5
 KillSignal=SIGINT
 TimeoutStopSec=15

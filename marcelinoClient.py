@@ -4,15 +4,20 @@ import json
 import socket
 import subprocess
 import threading
+import codecs
+import base64
+import hashlib
 from datetime import datetime, timezone
 import tkinter as tk
 import customtkinter as ctk
 from concurrent.futures import ThreadPoolExecutor
-from tkinter import filedialog, messagebox, ttk
+from tkinter import filedialog, messagebox, simpledialog, ttk
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 import shutil
 import tempfile
 import pystray
+import paramiko
+import pyte
 from types import SimpleNamespace
 from pathlib import Path
 
@@ -21,7 +26,12 @@ from PIL import Image, ImageDraw
 
 SMB_PORT = 445
 STATUS_FILENAME = ".marcelinoSrv.json"
+PUBLIC_SHARE_NAMES = {"public", "publico", "público"}
 MUTEX_NAME = "Local\\MarcelinoClientSingleInstance"
+
+
+def find_public_share(shares):
+    return next((share for share in shares if share.casefold() in PUBLIC_SHARE_NAMES), "")
 
 
 def acquire_single_instance():
@@ -320,11 +330,31 @@ class MetricRing(ctk.CTkFrame):
             self.set_theme_colors(colors)
             return
         percent = max(0.0, min(100.0, float(percent)))
-        extent = -min(359.9, 3.6 * percent)
+        extent = -min(359.0, 3.59 * percent)
         self.canvas.itemconfigure(self.progress_id, extent=extent)
         self.canvas.itemconfigure(self.value_id, text=f"{percent:.0f}%")
         self.detail_label.configure(text=detail)
         self.set_theme_colors(colors)
+
+
+class ConfirmHostKeyPolicy(paramiko.MissingHostKeyPolicy):
+    def __init__(self, app, known_hosts):
+        self.app = app
+        self.known_hosts = known_hosts
+
+    def missing_host_key(self, client, hostname, key):
+        fingerprint = base64.b64encode(hashlib.sha256(key.asbytes()).digest())
+        fingerprint = "SHA256:" + fingerprint.decode("ascii").rstrip("=")
+        decision = {"event": threading.Event(), "accepted": False}
+        self.app.ui(lambda: self.app._confirm_ssh_host_key(hostname, key.get_name(), fingerprint, decision))
+        if not decision["event"].wait(300):
+            raise paramiko.SSHException("Tempo esgotado aguardando confirmação da chave do servidor.")
+        if not decision["accepted"]:
+            raise paramiko.SSHException("Chave do servidor não foi aceita.")
+
+        self.known_hosts.parent.mkdir(parents=True, exist_ok=True)
+        client.get_host_keys().add(hostname, key.get_name(), key)
+        client.save_host_keys(str(self.known_hosts))
 
 
 class App(ctk.CTk):
@@ -346,6 +376,17 @@ class App(ctk.CTk):
         self.remote = None
         self.authenticated = False
         self.authenticated_user = None
+        self.authenticated_password = None
+        self.ssh_client = None
+        self.ssh_connecting_client = None
+        self.ssh_channel = None
+        self.ssh_screen = None
+        self.ssh_stream = None
+        self.ssh_decoder = None
+        self.ssh_style_tags = {}
+        self.ssh_screen_dirty = False
+        self.ssh_generation = 0
+        self.ssh_connecting = False
         self.status_generation = 0
         self.status_polling_generation = None
         self.status_share = None
@@ -370,6 +411,7 @@ class App(ctk.CTk):
         self._build()
         self._apply_theme(self.saved_settings.get("theme", "light"))
         self._restore_backup_settings()
+        self.after_idle(lambda: self.center_window(1000, 650))
         self._start_tray_icon()
         self.after(100, self._pump)
 
@@ -421,8 +463,19 @@ class App(ctk.CTk):
         if not self._closing:
             self.deiconify()
             self.state("normal")
+            self.center_window()
             self.lift()
             self.focus_force()
+
+    def center_window(self, width=None, height=None):
+        self.update_idletasks()
+        width = width or self.winfo_width()
+        height = height or self.winfo_height()
+        if width <= 1 or height <= 1:
+            width, height = 1000, 650
+        x = max(0, (self.winfo_screenwidth() - width) // 2)
+        y = max(0, (self.winfo_screenheight() - height - 80) // 2)
+        self.geometry(f"{width}x{height}+{x}+{y}")
 
     def toggle_window(self):
         if self.state() in ("iconic", "withdrawn"):
@@ -432,17 +485,20 @@ class App(ctk.CTk):
 
     def disconnect(self):
         remote = self.remote
+        self._close_ssh()
         self.status_generation += 1
         self._cancel_server_status_timer()
         self.status_polling_generation = None
         self.status_share = None
         self.authenticated = False
         self.authenticated_user = None
+        self.authenticated_password = None
         self.remote = None
         self.share, self.path = None, ""
         self.cancel.set()
         self.pwd.set("")
         self.auth_summary.set("Não autenticado")
+        self.session_display.set("Não autenticado")
         self.login_status.set("Desconectado.")
         self._fill([])
         self._reset_server_dashboard("Aguardando autenticação.")
@@ -460,6 +516,8 @@ class App(ctk.CTk):
         self._closing = True
         self.cancel.set()
         self._cancel_server_status_timer()
+        self._close_ssh(update_status=False)
+        self.authenticated_password = None
         if self._tray_icon is not None:
             self._tray_icon.stop()
         self.destroy()
@@ -511,6 +569,10 @@ class App(ctk.CTk):
         if isinstance(username, str):
             self.user.set(username)
 
+        ssh_key_path = self.saved_settings.get("ssh_key_path")
+        if isinstance(ssh_key_path, str):
+            self.ssh_key_path.set(ssh_key_path)
+
         server = self.saved_settings.get("server")
         if isinstance(server, dict):
             selection = server.get("selection")
@@ -554,6 +616,7 @@ class App(ctk.CTk):
             "sources": list(self.source_paths),
             "destination": destination,
             "theme": self.theme,
+            "ssh_key_path": self.ssh_key_path.get().strip(),
         }
         temp_path = None
         try:
@@ -584,21 +647,40 @@ class App(ctk.CTk):
         self.dest_lbl.configure(text=f"Destino: {location}")
 
     def _build(self):
-        self.tab_bar = ctk.CTkFrame(self, fg_color="transparent")
-        self.tab_bar.pack(fill="x", padx=8, pady=(8, 0))
-        ctk.CTkFrame(self, height=1, fg_color=("#c5d0d7", "#46545e")).pack(
-            fill="x", padx=8, pady=(4, 6),
-        )
-        self.tab_container = ctk.CTkFrame(self, fg_color="transparent")
-        self.tab_container.pack(fill="both", expand=True)
-        self.add_tab("Login", "♙", self._build_login_page)
-        self.add_tab("Sistema", "▦", self._build_system_page)
-        self.add_tab("Discos", "◉", self._build_disks_page)
-        self.add_tab("Backup", "⤓", self._build_backup_page)
+        self.login_page = ctk.CTkFrame(self, fg_color="transparent")
+        self._build_login_page(self.login_page)
+
+        self.main_page = ctk.CTkFrame(self, fg_color="transparent")
+        session_bar = ctk.CTkFrame(self.main_page, fg_color="transparent")
+        session_bar.pack(fill="x", padx=8, pady=(8, 0))
+        ctk.CTkLabel(session_bar, text="Sessão").pack(side="left", padx=(4, 8))
+        self.session_display = tk.StringVar(value="Não autenticado")
+        ctk.CTkEntry(
+            session_bar, textvariable=self.session_display, state="disabled", width=300,
+        ).pack(side="left", fill="x", expand=True)
         self.theme_button = self._accent_button(
-            self.tab_bar, width=120, height=34, corner_radius=6, command=self._toggle_theme,
+            session_bar, width=120, height=34, corner_radius=6, command=self._toggle_theme,
         )
         self.theme_button.pack(side="right", padx=(4, 0))
+        self.disconnect_button = self._accent_button(
+            session_bar, text="Desconectar", command=self.disconnect,
+            width=120, height=34, corner_radius=6,
+        )
+        self.disconnect_button.pack(side="right", padx=(4, 0))
+
+        self.tab_bar = ctk.CTkFrame(self.main_page, fg_color="transparent")
+        self.tab_bar.pack(fill="x", padx=8, pady=(8, 0))
+        ctk.CTkFrame(self.main_page, height=1, fg_color=("#c5d0d7", "#46545e")).pack(
+            fill="x", padx=8, pady=(4, 6),
+        )
+        self.tab_container = ctk.CTkFrame(self.main_page, fg_color="transparent")
+        self.tab_container.pack(fill="both", expand=True)
+        self.add_tab("Sistema", "▦", self._build_system_page)
+        self.add_tab("Discos", "◉", self._build_disks_page)
+        self.add_tab("Compartilhamentos", "▤", self._build_shares_page)
+        self.add_tab("Backup", "⤓", self._build_backup_page)
+        self.add_tab("Terminal", ">_", self._build_terminal_page)
+        self.login_page.pack(fill="both", expand=True)
 
     def _apply_theme(self, theme):
         if theme not in ("light", "dark"):
@@ -642,8 +724,6 @@ class App(ctk.CTk):
             disk_bar.configure(fg_color=colors["panel"], progress_color=colors["accent"])
         for filesystem_bar in getattr(self, "filesystem_progress_bars", []):
             filesystem_bar.configure(fg_color=colors["panel"], progress_color=colors["accent"])
-        if hasattr(self, "shared_partitions"):
-            self._render_disk_bars(self.shared_partitions)
         self.style.configure(".", background=colors["background"], foreground=colors["text"])
         self.style.configure("TFrame", background=colors["background"])
         self.style.configure("TLabel", background=colors["background"], foreground=colors["text"])
@@ -803,6 +883,322 @@ class App(ctk.CTk):
         self.log = ctk.CTkTextbox(page, height=100, state="disabled", corner_radius=8)
         self.log.pack(fill="x", padx=8, pady=(0, 8))
 
+    def _build_terminal_page(self, page):
+        controls = ctk.CTkFrame(page, fg_color="transparent")
+        controls.pack(fill="x", padx=8, pady=8)
+        self._accent_button(
+            controls, text="Conectar SSH", command=self._connect_ssh,
+        ).pack(side="left", padx=(0, 4))
+        self._accent_button(
+            controls, text="Desconectar", command=self._disconnect_ssh,
+        ).pack(side="left", padx=4)
+        self.ssh_status = tk.StringVar(value="Faça login para conectar ao servidor via SSH.")
+        VariableLabel(controls, self.ssh_status).pack(side="left", padx=12)
+
+        key_controls = ctk.CTkFrame(page, fg_color="transparent")
+        key_controls.pack(fill="x", padx=8, pady=(0, 8))
+        ctk.CTkLabel(key_controls, text="Arquivo de chave").pack(side="left", padx=(0, 6))
+        self.ssh_key_path = tk.StringVar()
+        key_path_entry = ctk.CTkEntry(key_controls, textvariable=self.ssh_key_path)
+        key_path_entry.pack(
+            side="left", fill="x", expand=True,
+        )
+        key_path_entry.bind("<FocusOut>", lambda _event: self._save_settings())
+        key_path_entry.bind("<Return>", lambda _event: self._save_settings())
+        self._accent_button(
+            key_controls, text="Selecionar...", command=self._select_ssh_key,
+        ).pack(side="left", padx=6)
+        ctk.CTkLabel(key_controls, text="Passphrase").pack(side="left", padx=(4, 6))
+        self.ssh_key_passphrase_entry = ctk.CTkEntry(
+            key_controls, width=160, show="*", placeholder_text="Opcional",
+        )
+        self.ssh_key_passphrase_entry.pack(side="left")
+
+        self.terminal_output = ctk.CTkTextbox(
+            page, corner_radius=8, font=ctk.CTkFont(family="Consolas", size=13),
+            wrap="none", fg_color="#101214", text_color="#d6d6d6",
+        )
+        self.terminal_output.pack(fill="both", expand=True, padx=8, pady=(0, 8))
+        terminal_widget = self.terminal_output._textbox
+        terminal_widget.configure(insertbackground="#ffffff", takefocus=True)
+        terminal_widget.bind("<KeyPress>", self._send_ssh_key)
+
+    def _select_ssh_key(self):
+        key_path = filedialog.askopenfilename(
+            parent=self,
+            title="Selecionar chave privada SSH",
+            filetypes=(("Todos os arquivos", "*.*"),),
+        )
+        if key_path:
+            self.ssh_key_path.set(key_path)
+            self._save_settings()
+
+    def _confirm_ssh_host_key(self, hostname, key_type, fingerprint, decision):
+        answer = simpledialog.askstring(
+            "Confiar no servidor SSH",
+            f"O servidor {hostname} ainda não está em known_hosts.\n"
+            f"Chave: {key_type}\nFingerprint: {fingerprint}\n\n"
+            "Digite yes para confiar e salvar esta chave:",
+            parent=self,
+        )
+        decision["accepted"] = bool(answer and answer.strip().casefold() == "yes")
+        decision["event"].set()
+
+    def _terminal_append(self, text):
+        if self.ssh_stream is not None:
+            self.ssh_stream.feed(text)
+            self.ssh_screen_dirty = True
+            return
+        terminal_widget = self.terminal_output._textbox
+        terminal_widget.insert("end", text)
+        terminal_widget.see("end")
+
+    def _connect_ssh(self):
+        if not self.authenticated or not self.remote or not self.authenticated_password:
+            self.ssh_status.set("Faça login na aba Login antes de conectar via SSH.")
+            return
+        if self.ssh_client or self.ssh_connecting:
+            return
+
+        self.ssh_generation += 1
+        generation = self.ssh_generation
+        host = self.remote.host
+        username = self.authenticated_user
+        password = self.authenticated_password
+        key_path = self.ssh_key_path.get().strip()
+        key_passphrase = self.ssh_key_passphrase_entry.get() or None
+        self.ssh_key_passphrase_entry.delete(0, "end")
+        self.ssh_connecting = True
+        self.ssh_status.set(f"Conectando a {username}@{host}:22...")
+        client = paramiko.SSHClient()
+        self.ssh_connecting_client = client
+
+        def run():
+            try:
+                client.load_system_host_keys()
+                known_hosts = Path.home() / ".ssh" / "known_hosts"
+                if known_hosts.exists():
+                    client.load_host_keys(str(known_hosts))
+                client.set_missing_host_key_policy(ConfirmHostKeyPolicy(self, known_hosts))
+                client.connect(
+                    host, port=22, username=username, password=password,
+                    key_filename=key_path or None, passphrase=key_passphrase,
+                    timeout=8, banner_timeout=8, auth_timeout=8,
+                    allow_agent=False, look_for_keys=False,
+                )
+                channel = client.invoke_shell(term="xterm", width=120, height=24)
+                self.ui(lambda: self._ssh_connection_result(generation, client, channel, None))
+            except Exception as error:
+                client.close()
+                error_text = str(error)
+                self.ui(lambda: self._ssh_connection_result(generation, None, None, error_text))
+
+        threading.Thread(target=run, daemon=True).start()
+
+    def _ssh_connection_result(self, generation, client, channel, error):
+        if generation != self.ssh_generation:
+            if client:
+                client.close()
+            return
+        self.ssh_connecting_client = None
+        self.ssh_connecting = False
+        if error:
+            self.ssh_status.set(f"Falha na conexão SSH: {error}")
+            self._terminal_append(f"Falha na conexão SSH: {error}\n")
+            return
+        self.ssh_client = client
+        self.ssh_channel = channel
+        self.ssh_screen = pyte.Screen(120, 24)
+        self.ssh_stream = pyte.Stream(self.ssh_screen)
+        self.ssh_decoder = codecs.getincrementaldecoder("utf-8")("replace")
+        self.ssh_style_tags = {}
+        channel.settimeout(0.05)
+        self.ssh_status.set(f"Conectado: {self.authenticated_user}@{self.remote.host}")
+        self.ssh_screen_dirty = True
+        self.terminal_output._textbox.focus_set()
+        threading.Thread(
+            target=self._read_ssh_output, args=(generation, channel), daemon=True,
+        ).start()
+
+    def _send_ssh_key(self, event):
+        channel = self.ssh_channel
+        if not channel or channel.closed:
+            return "break"
+        application_cursor_keys = (
+            self.ssh_screen is not None and (1 << 5) in self.ssh_screen.mode
+        )
+        data = self._ssh_key_data(
+            event.keysym, event.char, event.state, application_cursor_keys,
+        )
+        if data:
+            try:
+                channel.send(data)
+            except Exception as error:
+                self._terminal_append(f"\nErro SSH: {error}\n")
+        return "break"
+
+    @staticmethod
+    def _ssh_key_data(keysym, character, state, application_cursor_keys=False):
+        key_sequences = {
+            "Return": "\r", "KP_Enter": "\r", "BackSpace": "\x7f",
+            "Tab": "\t", "Escape": "\x1b", "Up": "\x1b[A",
+            "Down": "\x1b[B", "Right": "\x1b[C", "Left": "\x1b[D",
+            "Home": "\x1b[H", "End": "\x1b[F", "Insert": "\x1b[2~",
+            "Delete": "\x1b[3~", "Prior": "\x1b[5~", "Next": "\x1b[6~",
+            "F1": "\x1bOP", "F2": "\x1bOQ", "F3": "\x1bOR", "F4": "\x1bOS",
+            "F5": "\x1b[15~", "F6": "\x1b[17~", "F7": "\x1b[18~",
+            "F8": "\x1b[19~", "F9": "\x1b[20~", "F10": "\x1b[21~",
+            "F11": "\x1b[23~", "F12": "\x1b[24~",
+        }
+        control_pressed = bool(state & 0x4)
+        if control_pressed and keysym.lower() in "abcdefghijklmnopqrstuvwxyz":
+            return bytes((ord(keysym.lower()) - ord("a") + 1,))
+        if application_cursor_keys and keysym in ("Up", "Down", "Right", "Left"):
+            return ("\x1bO" + {"Up": "A", "Down": "B", "Right": "C", "Left": "D"}[keysym]).encode("ascii")
+        if keysym in key_sequences:
+            return key_sequences[keysym].encode("ascii")
+        if character and character >= " ":
+            return character.encode("utf-8")
+        return b""
+
+    def _read_ssh_output(self, generation, channel):
+        pending = bytearray()
+
+        def flush_pending():
+            if pending:
+                self.q.put(("ssh_data", (generation, bytes(pending))))
+                pending.clear()
+
+        while not channel.closed:
+            try:
+                output = channel.recv(32768)
+            except socket.timeout:
+                flush_pending()
+                continue
+            except Exception as error:
+                if not channel.closed:
+                    error_text = str(error)
+                    self.ui(lambda: self._terminal_append(f"Erro SSH: {error_text}\n"))
+                break
+            if not output:
+                break
+            pending.extend(output)
+            if len(pending) >= 32768:
+                flush_pending()
+        flush_pending()
+        self.ui(lambda: self._ssh_channel_closed(generation))
+
+    def _feed_ssh_output(self, generation, data):
+        if generation != self.ssh_generation or self.ssh_stream is None:
+            return
+        text = self.ssh_decoder.decode(data)
+        if text:
+            self.ssh_stream.feed(text)
+            self.ssh_screen_dirty = True
+
+    @staticmethod
+    def _ssh_color(color, default):
+        palette = {
+            "black": 0, "red": 1, "green": 2, "brown": 3,
+            "blue": 4, "magenta": 5, "cyan": 6, "white": 7,
+            "brightblack": 8, "brightred": 9, "brightgreen": 10,
+            "brightyellow": 11, "brightblue": 12, "brightmagenta": 13,
+            "brightcyan": 14, "brightwhite": 15,
+        }
+        if color == "default":
+            return default
+        if color in palette:
+            return "#" + pyte.graphics.FG_BG_256[palette[color]]
+        if len(color) == 6:
+            return "#" + color
+        return default
+
+    def _render_ssh_screen(self):
+        if self.ssh_screen is None:
+            return
+        terminal_widget = self.terminal_output._textbox
+        terminal_widget.delete("1.0", "end")
+        for row_index in range(self.ssh_screen.lines):
+            row = self.ssh_screen.buffer[row_index]
+            current_style = None
+            run = []
+            for column in range(self.ssh_screen.columns):
+                cell = row[column]
+                style = (
+                    cell.fg, cell.bg, cell.bold, cell.italics,
+                    cell.underscore, cell.reverse,
+                )
+                if current_style is not None and style != current_style:
+                    self._insert_ssh_run(terminal_widget, run, current_style)
+                    run = []
+                current_style = style
+                run.append(cell.data or " ")
+            if run:
+                self._insert_ssh_run(terminal_widget, run, current_style)
+            if row_index < self.ssh_screen.lines - 1:
+                terminal_widget.insert("end", "\n")
+
+        cursor = self.ssh_screen.cursor
+        terminal_widget.mark_set("insert", f"{cursor.y + 1}.{cursor.x}")
+        self.ssh_screen_dirty = False
+
+    def _insert_ssh_run(self, terminal_widget, run, style):
+        tag = self.ssh_style_tags.get(style)
+        if tag is None:
+            tag = f"ssh_style_{len(self.ssh_style_tags)}"
+            self.ssh_style_tags[style] = tag
+            foreground = self._ssh_color(style[0], "#d6d6d6")
+            background = self._ssh_color(style[1], "#101214")
+            if style[5]:
+                foreground, background = background, foreground
+            font_style = (
+                "Consolas", 13, "bold" if style[2] else "normal",
+                "italic" if style[3] else "roman",
+            )
+            terminal_widget.tag_configure(
+                tag, foreground=foreground, background=background,
+                font=font_style, underline=style[4],
+            )
+        terminal_widget.insert("end", "".join(run), (tag,))
+
+    def _ssh_channel_closed(self, generation):
+        if generation != self.ssh_generation:
+            return
+        self.ssh_channel = None
+        client, self.ssh_client = self.ssh_client, None
+        if client:
+            client.close()
+        self._clear_terminal()
+        self.ssh_status.set("Conexão SSH encerrada.")
+
+    def _disconnect_ssh(self):
+        self._close_ssh()
+
+    def _clear_terminal(self):
+        self.ssh_screen = None
+        self.ssh_stream = None
+        self.ssh_decoder = None
+        self.ssh_style_tags = {}
+        self.ssh_screen_dirty = False
+        if hasattr(self, "terminal_output"):
+            self.terminal_output._textbox.delete("1.0", "end")
+
+    def _close_ssh(self, update_status=True):
+        self.ssh_generation += 1
+        self.ssh_connecting = False
+        self._clear_terminal()
+        connecting_client, self.ssh_connecting_client = self.ssh_connecting_client, None
+        if connecting_client:
+            connecting_client.close()
+        channel, self.ssh_channel = self.ssh_channel, None
+        if channel:
+            channel.close()
+        client, self.ssh_client = self.ssh_client, None
+        if client:
+            client.close()
+        if update_status and hasattr(self, "ssh_status"):
+            self.ssh_status.set("Desconectado do SSH.")
+
     def _build_login_page(self, page):
         self.login_panel = self._section(page, "Acesso ao servidor SMB")
         self.login_panel.pack(fill="x", padx=8, pady=8)
@@ -852,17 +1248,6 @@ class App(ctk.CTk):
         self.login_status_frame = ctk.CTkFrame(page, fg_color="transparent")
         self.login_status_frame.pack(fill="x", padx=12, pady=4)
         VariableLabel(self.login_status_frame, self.login_status).pack(side="left", anchor="w")
-        self.change_login_button = self._accent_button(
-            self.login_status_frame,
-            text="Alterar servidor/usuário",
-            command=self.show_login_form,
-        )
-
-        ctk.CTkLabel(
-            page, text="A conexão SMB está configurada acima; métricas ficam na aba Sistema.",
-            text_color=("#53636d", "#a8b6bf"),
-        ).pack(anchor="w", padx=12, pady=8)
-
     def _build_system_page(self, page):
         content = ctk.CTkScrollableFrame(page, fg_color="transparent")
         content.pack(fill="both", expand=True, padx=8, pady=4)
@@ -940,42 +1325,19 @@ class App(ctk.CTk):
         identity_grid.columnconfigure(1, weight=1)
         identity_grid.columnconfigure(3, weight=1)
 
-        filesystems = self._section(content, "Sistemas de arquivos montados")
-        filesystems.pack(fill="x", padx=2, pady=(4, 8))
-        self.filesystem_bars_container = ctk.CTkFrame(filesystems, fg_color="transparent")
-        self.filesystem_bars_container.pack(fill="x", padx=8, pady=(0, 8))
-        self.filesystem_rows = {}
-        self.filesystem_progress_bars = []
-        self.filesystem_empty_label = None
-
     def _build_disks_page(self, page):
         self.disk_overview = tk.StringVar(value="Aguardando dados do servidor.")
         VariableLabel(page, self.disk_overview).pack(anchor="w", padx=12, pady=(8, 4))
 
         storage = ctk.CTkFrame(page, fg_color="transparent")
         storage.pack(fill="both", expand=True, padx=8, pady=4)
-        disk_bars = self._section(storage, "Uso do espaço em volumes")
-        disk_bars.pack(fill="x", pady=(0, 4))
-        self.disk_bars_container = ctk.CTkFrame(disk_bars, fg_color="transparent")
-        self.disk_bars_container.pack(fill="x", padx=8, pady=(0, 8))
-        self.disk_bar_rows = []
-        self.disk_usage_bars = []
-        self.shared_partitions = []
-
-        partitions = self._section(storage, "Compartilhamentos montados")
-        partitions.pack(fill="both", expand=True, pady=(4, 4))
-        self.partition_tree = ttk.Treeview(
-            partitions, columns=("volume", "total", "livre", "uso"), show="headings", height=4,
-        )
-        for column, title, width in (
-            ("volume", "Volume / montagem", 300),
-            ("total", "Capacidade", 150),
-            ("livre", "Livre", 150),
-            ("uso", "Uso", 90),
-        ):
-            self.partition_tree.heading(column, text=title)
-            self.partition_tree.column(column, width=width, anchor="w")
-        self.partition_tree.pack(fill="both", expand=True, padx=8, pady=(0, 8))
+        filesystems = self._section(storage, "Sistemas de arquivos montados")
+        filesystems.pack(fill="x", pady=(0, 4))
+        self.filesystem_bars_container = ctk.CTkFrame(filesystems, fg_color="transparent")
+        self.filesystem_bars_container.pack(fill="x", padx=8, pady=(0, 8))
+        self.filesystem_rows = {}
+        self.filesystem_progress_bars = []
+        self.filesystem_empty_label = None
 
         physical_disks = self._section(storage, "Discos físicos e SMART")
         physical_disks.pack(fill="both", expand=True, pady=(4, 0))
@@ -997,11 +1359,41 @@ class App(ctk.CTk):
         self.physical_disk_tree.pack(fill="both", expand=True, padx=8, pady=(0, 8))
         self.storage_status = tk.StringVar(value="Aguardando métricas de armazenamento.")
         VariableLabel(storage, self.storage_status).pack(anchor="w", padx=8, pady=(4, 2))
-        ctk.CTkLabel(
-            storage,
-            text=f"O agente publica {STATUS_FILENAME} na raiz do compartilhamento com o nome do usuário.",
-            text_color=("#53636d", "#a8b6bf"),
-        ).pack(anchor="w", padx=8, pady=(0, 4))
+
+    def _build_shares_page(self, page):
+        self.samba_share_status = tk.StringVar(value="Aguardando dados do servidor.")
+        VariableLabel(page, self.samba_share_status).pack(anchor="w", padx=12, pady=(8, 4))
+        table = ctk.CTkFrame(page, fg_color="transparent")
+        table.pack(fill="both", expand=True, padx=8, pady=4)
+        columns = (
+            "share", "path", "valid_users", "read_list", "write_list",
+            "admin_users", "invalid_users", "guest_ok", "read_only",
+        )
+        self.samba_share_tree = ttk.Treeview(table, columns=columns, show="headings")
+        headings = (
+            ("share", "Compartilhamento", 150),
+            ("path", "Caminho", 220),
+            ("valid_users", "Usuários/grupos permitidos", 230),
+            ("read_list", "Somente leitura", 180),
+            ("write_list", "Leitura e escrita", 180),
+            ("admin_users", "Administradores", 180),
+            ("invalid_users", "Bloqueados", 180),
+            ("guest_ok", "Convidados", 100),
+            ("read_only", "Share somente leitura", 150),
+        )
+        for column, heading, width in headings:
+            self.samba_share_tree.heading(column, text=heading)
+            self.samba_share_tree.column(column, width=width, minwidth=90, anchor="w")
+        vertical_scroll = ttk.Scrollbar(table, orient="vertical", command=self.samba_share_tree.yview)
+        horizontal_scroll = ttk.Scrollbar(table, orient="horizontal", command=self.samba_share_tree.xview)
+        self.samba_share_tree.configure(
+            yscrollcommand=vertical_scroll.set, xscrollcommand=horizontal_scroll.set,
+        )
+        self.samba_share_tree.grid(row=0, column=0, sticky="nsew")
+        vertical_scroll.grid(row=0, column=1, sticky="ns")
+        horizontal_scroll.grid(row=1, column=0, sticky="ew")
+        table.grid_rowconfigure(0, weight=1)
+        table.grid_columnconfigure(0, weight=1)
 
     # ---- util
     def say(self, msg):
@@ -1024,8 +1416,13 @@ class App(ctk.CTk):
                 progress = done / total if total else 1
                 self.bar.set(progress)
                 self.bar_lbl.configure(text=f"{progress:.0%} ({done}/{total} arquivos)")
+            elif kind == "ssh_data":
+                generation, data = val
+                self._feed_ssh_output(generation, data)
             elif kind == "call":
                 val()
+        if self.ssh_screen_dirty:
+            self._render_ssh_screen()
         self.after(100, self._pump)
 
     def ui(self, fn):
@@ -1036,10 +1433,18 @@ class App(ctk.CTk):
         return "break"
 
     def show_login_form(self):
-        if not self.login_panel.winfo_manager():
-            self.login_panel.pack(fill="x", padx=8, pady=8, before=self.login_status_frame)
-        self.change_login_button.pack_forget()
+        self.main_page.pack_forget()
+        if not self.login_page.winfo_manager():
+            self.login_page.pack(fill="both", expand=True)
+        self.session_display.set("Não autenticado")
         self.host_cb.focus_set()
+
+    def show_main_page(self):
+        self.login_page.pack_forget()
+        if not self.main_page.winfo_manager():
+            self.main_page.pack(fill="both", expand=True)
+        self.session_display.set(f"{self.authenticated_user} @ {self.remote.host}")
+        self.select_tab("Sistema")
 
     # ---- descoberta / conexão
     def scan(self):
@@ -1052,6 +1457,8 @@ class App(ctk.CTk):
         threading.Thread(target=run, daemon=True).start()
 
     def connect(self):
+        self._close_ssh(update_status=False)
+        self.authenticated_password = None
         self.status_generation += 1
         generation = self.status_generation
         self._cancel_server_status_timer()
@@ -1082,10 +1489,10 @@ class App(ctk.CTk):
             try:
                 remote = Remote(ip, name, user, password)
                 shares = remote.list_shares(user, password)
-                self.ui(lambda: self._show_shares(remote, shares, user, generation))
+                self.ui(lambda: self._show_shares(remote, shares, user, password, generation))
             except Exception as e:
-                error = str(e)
-                self.ui(lambda: self._login_failed(ip, error, generation))
+                error_text = str(e)
+                self.ui(lambda: self._login_failed(ip, error_text, generation))
 
         threading.Thread(target=run, daemon=True).start()
 
@@ -1095,6 +1502,7 @@ class App(ctk.CTk):
         self.show_login_form()
         self.authenticated = False
         self.authenticated_user = None
+        self.authenticated_password = None
         self.remote = None
         self.status_share = None
         self.share, self.path = None, ""
@@ -1103,11 +1511,12 @@ class App(ctk.CTk):
         self._reset_server_dashboard("Autenticação inválida.")
         self.say(f"Erro ao conectar: {error}")
 
-    def _show_shares(self, remote, shares, user, generation):
+    def _show_shares(self, remote, shares, user, password, generation):
         if generation != self.status_generation:
             return
         self.authenticated = True
         self.authenticated_user = user
+        self.authenticated_password = password
         self.remote = remote
         selection = self.host_var.get().strip() or f"{remote.name} ({remote.host})"
         self.saved_server = {
@@ -1126,14 +1535,9 @@ class App(ctk.CTk):
         self.pwd.set("")
         self.auth_summary.set(f"Autenticado: {user} @ {remote.host}")
         self.login_status.set(f"Acesso validado para {user} em {remote.host}.")
-        self.login_panel.pack_forget()
-        self.change_login_button.pack(side="right", padx=(8, 0))
         self._save_settings()
-        share_user = user.rsplit("\\", 1)[-1].rsplit("/", 1)[-1].strip()
-        self.status_share = next(
-            (share for share in shares if share.casefold() == share_user.casefold()),
-            "",
-        )
+        self.show_main_page()
+        self.status_share = find_public_share(shares)
         self.path_lbl.configure(text=f"\\\\{remote.host}\\")
         self._update_dest_label()
         self._fill([("share", share) for share in shares])
@@ -1143,7 +1547,7 @@ class App(ctk.CTk):
                 self._request_server_status(generation)
             else:
                 self._reset_server_dashboard(
-                    f"Compartilhamento '{share_user}' não encontrado. "
+                    "Compartilhamento público não encontrado. "
                     f"O agente deve publicar {STATUS_FILENAME} na raiz dele."
                 )
         else:
@@ -1161,9 +1565,8 @@ class App(ctk.CTk):
         for ring in self.metric_rings.values():
             ring.set_value(None, message, self.theme_colors)
         self._render_system_filesystems([])
-        self.shared_partitions = []
-        self._render_disk_bars([])
-        for tree in (self.partition_tree, self.physical_disk_tree):
+        self._render_samba_shares([])
+        for tree in (self.physical_disk_tree, self.samba_share_tree):
             for row in tree.get_children():
                 tree.delete(row)
 
@@ -1223,33 +1626,42 @@ class App(ctk.CTk):
             row_widgets["progress"] for row_widgets in self.filesystem_rows.values()
         ]
 
-    def _render_disk_bars(self, partitions):
-        for row in self.disk_bar_rows:
-            row.destroy()
-        self.disk_bar_rows.clear()
-        self.disk_usage_bars.clear()
-        for partition in partitions:
-            row = ctk.CTkFrame(self.disk_bars_container, fg_color="transparent")
-            row.pack(fill="x", padx=2, pady=3)
-            volume = f"{partition['device']} {partition['mountpoint']}"
-            ctk.CTkLabel(row, text=volume, anchor="w", width=220).pack(side="left", padx=(4, 8))
-            progress = ctk.CTkProgressBar(
-                row,
-                height=12,
-                fg_color=self.theme_colors["panel"],
-                progress_color=self.theme_colors["accent"],
+    def _render_samba_shares(self, shares):
+        for row in self.samba_share_tree.get_children():
+            self.samba_share_tree.delete(row)
+        if shares is None:
+            self.samba_share_status.set(
+                "Atualize o agente do servidor para publicar as permissões dos compartilhamentos."
             )
-            progress.set(max(0.0, min(1.0, float(partition["percent"]) / 100)))
-            progress.pack(side="left", fill="x", expand=True, padx=4)
-            ctk.CTkLabel(
-                row,
-                text=f"{float(partition['percent']):.0f}% usado · "
-                     f"{self._format_bytes(partition['free_bytes'])} livre",
-                width=170,
-                anchor="e",
-            ).pack(side="right", padx=(8, 4))
-            self.disk_bar_rows.append(row)
-            self.disk_usage_bars.append(progress)
+            return
+        if not shares:
+            self.samba_share_status.set("Nenhum compartilhamento Samba publicado pelo servidor.")
+            return
+
+        def rule(value):
+            return str(value).strip() or "Não especificado"
+
+        def yes_no(value):
+            value = str(value).strip().casefold()
+            if value in ("yes", "true", "1"):
+                return "Sim"
+            if value in ("no", "false", "0"):
+                return "Não"
+            return "Padrão Samba"
+
+        for share in sorted(shares, key=lambda item: item.get("name", "").casefold()):
+            self.samba_share_tree.insert("", "end", values=(
+                share.get("name", "--"),
+                share.get("path") or "--",
+                rule(share.get("valid_users")),
+                rule(share.get("read_list")),
+                rule(share.get("write_list")),
+                rule(share.get("admin_users")),
+                rule(share.get("invalid_users")),
+                yes_no(share.get("guest_ok")),
+                yes_no(share.get("read_only")),
+            ))
+        self.samba_share_status.set(f"{len(shares)} compartilhamentos configurados no Samba.")
 
     def refresh_server_status(self, _event=None):
         self._cancel_server_status_timer()
@@ -1283,7 +1695,7 @@ class App(ctk.CTk):
             return
         share = self.status_share
         if not share:
-            self._reset_server_dashboard("O compartilhamento do usuário não está disponível.")
+            self._reset_server_dashboard("O compartilhamento público não está disponível.")
             return
         if self.status_polling_generation == generation:
             return
@@ -1376,17 +1788,7 @@ class App(ctk.CTk):
             self.server_overview.set(overview)
             self.disk_overview.set(overview)
             self._render_system_filesystems(data.get("filesystems", []))
-            self.shared_partitions = data["shared_partitions"]
-            self._render_disk_bars(self.shared_partitions)
-            for row in self.partition_tree.get_children():
-                self.partition_tree.delete(row)
-            for partition in self.shared_partitions:
-                self.partition_tree.insert("", "end", values=(
-                    f"{partition['device']} {partition['mountpoint']}",
-                    self._format_bytes(partition["total_bytes"]),
-                    self._format_bytes(partition["free_bytes"]),
-                    f"{float(partition['percent']):.0f}%",
-                ))
+            self._render_samba_shares(data.get("samba_shares"))
             for row in self.physical_disk_tree.get_children():
                 self.physical_disk_tree.delete(row)
             for disk in data["physical_disks"]:
@@ -1401,8 +1803,6 @@ class App(ctk.CTk):
             status_notes = []
             if data.get("share_discovery_error"):
                 status_notes.append(data["share_discovery_error"])
-            elif not data["shared_partitions"]:
-                status_notes.append("Nenhum volume com compartilhamento SMB encontrado.")
             if data.get("smartctl_error"):
                 status_notes.append(data["smartctl_error"])
             self.storage_status.set(" · ".join(status_notes) or "SMART consultado pelo agente do servidor.")

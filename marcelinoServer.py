@@ -94,7 +94,18 @@ def _windows_share_paths():
             break
 
 
-def _samba_share_paths(config_path):
+SHARE_ACCESS_OPTIONS = (
+    "valid users",
+    "invalid users",
+    "read list",
+    "write list",
+    "admin users",
+    "guest ok",
+    "read only",
+)
+
+
+def _samba_share_configs(config_path):
     shares = {}
     visited = set()
 
@@ -123,11 +134,16 @@ def _samba_share_paths(config_path):
             if key.casefold() == "include":
                 for included in glob.glob(os.path.expandvars(os.path.expanduser(value))):
                     read_config(included)
-            elif current_share and key.casefold() == "path":
-                shares[current_share]["path"] = value
+            elif current_share and key.casefold() in ("path", *SHARE_ACCESS_OPTIONS):
+                shares[current_share][key.casefold()] = value
 
     read_config(config_path)
-    paths = []
+    return shares
+
+
+def _samba_share_entries(config_path):
+    shares = _samba_share_configs(config_path)
+    entries = {}
     for share_name, settings in shares.items():
         raw_path = settings.get("path")
         if not raw_path:
@@ -135,8 +151,56 @@ def _samba_share_paths(config_path):
         expanded_path = raw_path.replace("%S", share_name).replace("%s", share_name)
         if "%" in expanded_path:
             continue
-        paths.append(os.path.expandvars(os.path.expanduser(expanded_path)))
-    return paths
+        entries[share_name] = os.path.expandvars(os.path.expanduser(expanded_path))
+    return entries
+
+
+def collect_samba_shares(smb_config=None):
+    config_path = Path(smb_config or "/etc/samba/smb.conf")
+    configurations = _samba_share_configs(config_path)
+    global_options = configurations.get("global", {})
+    shares = []
+    for name, options in configurations.items():
+        if name.casefold() == "global":
+            continue
+        effective_options = {**global_options, **options}
+        raw_path = effective_options.get("path", "")
+        path = raw_path.replace("%S", name).replace("%s", name)
+        if "%" not in path:
+            path = os.path.expandvars(os.path.expanduser(path))
+        shares.append({
+            "name": name,
+            "path": path,
+            "valid_users": effective_options.get("valid users", ""),
+            "invalid_users": effective_options.get("invalid users", ""),
+            "read_list": effective_options.get("read list", ""),
+            "write_list": effective_options.get("write list", ""),
+            "admin_users": effective_options.get("admin users", ""),
+            "guest_ok": effective_options.get("guest ok", ""),
+            "read_only": effective_options.get("read only", ""),
+        })
+    return shares
+
+
+def _samba_share_paths(config_path):
+    return list(_samba_share_entries(config_path).values())
+
+
+def find_public_share_path(smb_config=None, share_name="public"):
+    config_path = Path(smb_config or "/etc/samba/smb.conf")
+    if not config_path.is_file():
+        raise FileNotFoundError(f"Arquivo de configuração SMB não encontrado: {config_path}")
+    shares = {
+        name.casefold(): Path(path)
+        for name, path in _samba_share_entries(config_path).items()
+    }
+    candidates = (share_name, "public", "publico", "público")
+    for candidate in dict.fromkeys(name.casefold() for name in candidates if name):
+        if candidate in shares:
+            return shares[candidate]
+    raise FileNotFoundError(
+        f"Compartilhamento público '{share_name}' não encontrado em {config_path}"
+    )
 
 
 def collect_share_paths(smb_config=None):
@@ -568,6 +632,7 @@ def collect_status(smb_config=None, smartctl_path=None):
         },
         "shared_partitions": shared_partitions,
         "share_discovery_error": share_error,
+        "samba_shares": collect_samba_shares(smb_config),
         "physical_disks": physical_disks,
         "smartctl_error": smartctl_error,
         "smart_sampled_at": smart_sampled_at,
@@ -601,13 +666,17 @@ def publish_status(output_path, smb_config=None, file_mode=DEFAULT_FILE_MODE):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
-        "--output", type=Path, default=Path(STATUS_FILENAME),
+        "--output", type=Path,
         help=(
-            f"caminho do JSON na pasta compartilhada (padrão: {STATUS_FILENAME} "
-            "na pasta atual; execute na raiz do compartilhamento com o nome do usuário)"
+            f"caminho explícito do JSON (padrão: {STATUS_FILENAME} na raiz do "
+            "compartilhamento público)"
         ),
     )
     parser.add_argument("--smb-config", type=Path, help="caminho do smb.conf no Linux")
+    parser.add_argument(
+        "--public-share", default="public",
+        help="nome do compartilhamento público no smb.conf (padrão: public)",
+    )
     parser.add_argument(
         "--file-mode",
         type=lambda value: int(value, 8),
@@ -622,16 +691,23 @@ def main():
         parser.error("--file-mode deve conter permissões Unix entre 0000 e 0777")
     if platform.system() != "Linux":
         parser.error("o agente de métricas só pode ser executado em Linux")
+    if args.output is not None:
+        output_path = args.output
+    else:
+        try:
+            output_path = find_public_share_path(args.smb_config, args.public_share) / STATUS_FILENAME
+        except (FileNotFoundError, OSError) as error:
+            parser.error(str(error))
 
     print(
-        f"Publicando métricas em {args.output.resolve()} "
+        f"Publicando métricas em {output_path.resolve()} "
         f"a cada {args.interval:g}s. Ctrl+C para sair."
     )
     try:
         while True:
             started = time.monotonic()
             try:
-                publish_status(args.output, args.smb_config, args.file_mode)
+                publish_status(output_path, args.smb_config, args.file_mode)
                 print(f"Atualizado: {datetime.now().strftime('%H:%M:%S')}")
             except Exception as error:
                 print(f"Falha ao publicar métricas: {error}")

@@ -40,11 +40,14 @@ install -d -o root -g root -m 0755 "${APP_DIR}"
 install -o root -g root -m 0644 "${SCRIPT_DIR}/marcelinoServer.py" "${APP_SCRIPT}"
 install -o root -g root -m 0644 "${SCRIPT_DIR}/marcelinoServer.service" "${SERVICE_PATH}"
 
+PUBLIC_SHARE_PATH=$(/usr/bin/python3 -c 'import sys; sys.path.insert(0, "/opt/marcelinoServer"); from marcelinoServer import find_public_share_path; print(find_public_share_path())')
+STATUS_PATH="${PUBLIC_SHARE_PATH}/.marcelinoSrv.json"
+
 if [[ ! -f "${CONFIG_PATH}" ]]; then
     install -d -o root -g root -m 0755 /etc/default
     cat > "${CONFIG_PATH}" <<EOF
 MARCELINOSRV_SCRIPT=${APP_SCRIPT}
-MARCELINOSRV_STATUS=/srv/marcelo/.marcelinoSrv.json
+MARCELINOSRV_STATUS=${STATUS_PATH}
 MARCELINOSRV_INTERVAL=5
 MARCELINOSRV_FILE_MODE=0644
 EOF
@@ -54,12 +57,29 @@ else
     echo "Preserving existing configuration: ${CONFIG_PATH}"
 fi
 
+CONFIG_TMP=$(mktemp)
+awk -v status_path="${STATUS_PATH}" '
+    /^MARCELINOSRV_STATUS=/ {
+        print "MARCELINOSRV_STATUS=" status_path
+        updated = 1
+        next
+    }
+    { print }
+    END {
+        if (!updated) print "MARCELINOSRV_STATUS=" status_path
+    }
+' "${CONFIG_PATH}" > "${CONFIG_TMP}"
+chown --reference="${CONFIG_PATH}" "${CONFIG_TMP}"
+chmod --reference="${CONFIG_PATH}" "${CONFIG_TMP}"
+mv "${CONFIG_TMP}" "${CONFIG_PATH}"
+
 if command -v systemd-analyze >/dev/null 2>&1; then
     systemd-analyze verify "${SERVICE_PATH}"
 fi
 
 systemctl daemon-reload
-systemctl enable --now "${SERVICE_NAME}"
+systemctl enable "${SERVICE_NAME}"
+systemctl restart "${SERVICE_NAME}"
 
 if ! command -v smartctl >/dev/null 2>&1; then
     echo "Warning: smartctl is missing; SMART disk data will be unavailable." >&2
