@@ -36,7 +36,7 @@ THEME_PALETTE = {
     "text": ("#1d2a32", "#edf2f5"),
     "muted": ("#53636d", "#a8b6bf"),
     "border": ("#c5d0d7", "#46545e"),
-    "accent": ("#167b88", "#3d9b8b"),
+    "accent": ("#167b88", "#28786d"),
     "hover": ("#d6e7ea", "#356f67"),
     "accent_hover": ("#0f6872", "#356f67"),
     "selected_text": ("#ffffff", "#ffffff"),
@@ -673,6 +673,7 @@ class App(ctk.CTk):
         self.session_display = tk.StringVar(value="Não autenticado")
         ctk.CTkEntry(
             session_bar, textvariable=self.session_display, state="disabled", width=300,
+            fg_color=THEME_PALETTE["input"],
         ).pack(side="left", fill="x", expand=True)
         self.theme_button = self._accent_button(
             session_bar, width=120, height=34, corner_radius=6, command=self._toggle_theme,
@@ -706,9 +707,13 @@ class App(ctk.CTk):
         theme_index = 1 if theme == "dark" else 0
         colors = {key: value[theme_index] for key, value in THEME_PALETTE.items()}
         self.theme_button.configure(text="☀ Claro" if theme == "dark" else "☾ Escuro")
+        self.login_theme_button.configure(text="☀ Claro" if theme == "dark" else "☾ Escuro")
 
         self.theme_colors = colors
         self.configure(fg_color=colors["background"])
+        backup_bar = getattr(self, "bar", None)
+        if backup_bar is not None:
+            backup_bar.configure(fg_color=colors["panel"], progress_color=colors["accent"])
         for ring in getattr(self, "metric_rings", {}).values():
             ring.set_theme_colors(colors)
         for disk_bar in getattr(self, "disk_usage_bars", []):
@@ -775,9 +780,11 @@ class App(ctk.CTk):
             selected = title == self.active_tab
             tab["button"].configure(
                 fg_color=colors["accent"] if selected else colors["panel"],
-                hover_color=colors["hover"],
+                hover_color=colors["accent_hover"] if selected else colors["hover"],
                 text_color=colors["selected_text"] if selected else colors["text"],
             )
+        for remote_button in getattr(self, "remote_buttons", []):
+            remote_button.configure(hover_color=colors["hover"], text_color=colors["text"])
     def _toggle_theme(self):
         self._apply_theme("dark" if self.theme == "light" else "light")
         self._save_settings()
@@ -810,7 +817,9 @@ class App(ctk.CTk):
             selected = tab_title == title
             tab["button"].configure(
                 fg_color=self.theme_colors["accent"] if selected else self.theme_colors["panel"],
-                hover_color=self.theme_colors["hover"],
+                hover_color=(
+                    self.theme_colors["accent_hover"] if selected else self.theme_colors["hover"]
+                ),
                 text_color=(
                     self.theme_colors["selected_text"] if selected else self.theme_colors["text"]
                 ),
@@ -867,7 +876,11 @@ class App(ctk.CTk):
         act.pack(fill="x", padx=8, pady=4)
         self._accent_button(act, text="Iniciar backup", command=self.start_backup).pack(side="left")
         self._accent_button(act, text="Cancelar", command=self.cancel.set).pack(side="left", padx=4)
-        self.bar = ctk.CTkProgressBar(act)
+        self.bar = ctk.CTkProgressBar(
+            act,
+            fg_color=self.theme_colors["panel"],
+            progress_color=self.theme_colors["accent"],
+        )
         self.bar.set(0)
         self.bar.pack(side="left", fill="x", expand=True, padx=8)
         self.bar_lbl = ctk.CTkLabel(act, text="0%", width=130)
@@ -891,7 +904,10 @@ class App(ctk.CTk):
         key_controls.pack(fill="x", padx=8, pady=(0, 8))
         ctk.CTkLabel(key_controls, text="Arquivo de chave").pack(side="left", padx=(0, 6))
         self.ssh_key_path = tk.StringVar()
-        key_path_entry = ctk.CTkEntry(key_controls, textvariable=self.ssh_key_path)
+        key_path_entry = ctk.CTkEntry(
+            key_controls, textvariable=self.ssh_key_path,
+            fg_color=THEME_PALETTE["input"],
+        )
         key_path_entry.pack(
             side="left", fill="x", expand=True,
         )
@@ -903,6 +919,7 @@ class App(ctk.CTk):
         ctk.CTkLabel(key_controls, text="Passphrase").pack(side="left", padx=(4, 6))
         self.ssh_key_passphrase_entry = ctk.CTkEntry(
             key_controls, width=160, show="*", placeholder_text="Opcional",
+            fg_color=THEME_PALETTE["input"],
         )
         self.ssh_key_passphrase_entry.pack(side="left")
 
@@ -1185,6 +1202,10 @@ class App(ctk.CTk):
         self.login_panel.pack(fill="x", padx=8, pady=8)
         login = ctk.CTkFrame(self.login_panel, fg_color="transparent")
         login.pack(fill="x", padx=8, pady=(0, 8))
+        self.login_theme_button = self._accent_button(
+            login, width=120, height=34, corner_radius=6, command=self._toggle_theme,
+        )
+        self.login_theme_button.grid(row=0, column=4, padx=8, pady=6, sticky="e")
         self.host_var = tk.StringVar()
         self.host_cb = ctk.CTkComboBox(
             login,
@@ -1198,7 +1219,7 @@ class App(ctk.CTk):
             button_color=THEME_PALETTE["accent"],
             button_hover_color=THEME_PALETTE["accent_hover"],
             dropdown_fg_color=THEME_PALETTE["panel"],
-            dropdown_hover_color=THEME_PALETTE["accent"],
+            dropdown_hover_color=THEME_PALETTE["hover"],
             dropdown_text_color=THEME_PALETTE["text"],
         )
         ctk.CTkLabel(login, text="Servidor").grid(row=1, column=0, padx=8, pady=6, sticky="e")
@@ -1211,12 +1232,14 @@ class App(ctk.CTk):
         ctk.CTkLabel(login, text="Usuário").grid(row=2, column=0, padx=8, pady=6, sticky="e")
         ctk.CTkEntry(
             login, textvariable=self.user, width=220,
+            fg_color=THEME_PALETTE["input"],
             text_color=THEME_PALETTE["text"],
             placeholder_text_color=THEME_PALETTE["muted"],
         ).grid(row=2, column=1, padx=4, pady=6)
         ctk.CTkLabel(login, text="Senha").grid(row=2, column=2, padx=4, pady=6, sticky="e")
         password_entry = ctk.CTkEntry(
             login, textvariable=self.pwd, show="*", width=220,
+            fg_color=THEME_PALETTE["input"],
             text_color=THEME_PALETTE["text"],
             placeholder_text_color=THEME_PALETTE["muted"],
         )
@@ -1230,7 +1253,7 @@ class App(ctk.CTk):
         self.login_status_frame.pack(fill="x", padx=12, pady=4)
         VariableLabel(self.login_status_frame, self.login_status).pack(side="left", anchor="w")
     def _build_system_page(self, page):
-        content = ctk.CTkScrollableFrame(page, fg_color="transparent")
+        content = ctk.CTkScrollableFrame(page, fg_color=THEME_PALETTE["background"])
         content.pack(fill="both", expand=True, padx=8, pady=4)
         summary = self._section(content, "Resumo do servidor")
         summary.pack(fill="x", padx=2, pady=(0, 4))
@@ -1252,7 +1275,7 @@ class App(ctk.CTk):
             button_hover_color=THEME_PALETTE["accent_hover"],
             text_color=THEME_PALETTE["selected_text"],
             dropdown_fg_color=THEME_PALETTE["panel"],
-            dropdown_hover_color=THEME_PALETTE["accent"],
+            dropdown_hover_color=THEME_PALETTE["hover"],
             dropdown_text_color=THEME_PALETTE["text"],
             command=self._status_interval_changed,
         ).pack(side="left", padx=4)
@@ -2005,6 +2028,7 @@ class App(ctk.CTk):
                 anchor="w",
                 fg_color="transparent",
                 hover_color=self.theme_colors["hover"],
+                text_color=self.theme_colors["text"],
                 command=lambda item_index=index: self.open_item(item_index),
             )
             button.pack(fill="x", padx=2, pady=1)
