@@ -12,7 +12,7 @@ from datetime import datetime, timezone
 import tkinter as tk
 import customtkinter as ctk
 from concurrent.futures import ThreadPoolExecutor
-from tkinter import filedialog, messagebox, simpledialog, ttk
+from tkinter import filedialog
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 import shutil
 import tempfile
@@ -28,7 +28,7 @@ from PIL import Image, ImageDraw
 
 SMB_PORT = 445
 STATUS_FILENAME = ".marcelinoSrv.json"
-PUBLIC_SHARE_NAMES = {"public", "publico", "público"}
+MONITOR_SHARE = "Monitor"  # share oculto (browseable = no), acessado pelo nome
 MUTEX_NAME = "Local\\MarcelinoClientSingleInstance"
 THEME_PALETTE = {
     "background": ("#f2f5f7", "#171d22"),
@@ -45,8 +45,57 @@ THEME_PALETTE = {
 }
 
 
-def find_public_share(shares):
-    return next((share for share in shares if share.casefold() in PUBLIC_SHARE_NAMES), "")
+def show_info_dialog(parent, title, message):
+    dialog = ctk.CTkToplevel(parent)
+    dialog.title(title)
+    dialog.geometry("420x160")
+    dialog.resizable(False, False)
+    dialog.transient(parent)
+    ctk.CTkLabel(dialog, text=message, wraplength=380, justify="left").pack(
+        fill="both", expand=True, padx=20, pady=(20, 10),
+    )
+    ctk.CTkButton(dialog, text="OK", width=90, command=dialog.destroy).pack(pady=(0, 16))
+    dialog.bind("<Return>", lambda _event: dialog.destroy())
+    dialog.bind("<Escape>", lambda _event: dialog.destroy())
+    dialog.wait_visibility()
+    dialog.grab_set()
+    dialog.wait_window()
+
+
+def ask_text_dialog(parent, title, message):
+    dialog = ctk.CTkToplevel(parent)
+    dialog.title(title)
+    dialog.geometry("480x230")
+    dialog.resizable(False, False)
+    dialog.transient(parent)
+    result: list[str | None] = [None]
+    ctk.CTkLabel(dialog, text=message, wraplength=440, justify="left").pack(
+        fill="x", padx=20, pady=(20, 12),
+    )
+    entry = ctk.CTkEntry(dialog, width=430)
+    entry.pack(fill="x", padx=20, pady=(0, 16))
+
+    def submit():
+        result[0] = entry.get()
+        dialog.destroy()
+
+    buttons = ctk.CTkFrame(dialog, fg_color="transparent")
+    buttons.pack(pady=(0, 16))
+    ctk.CTkButton(buttons, text="Cancelar", width=100, command=dialog.destroy).pack(
+        side="left", padx=6,
+    )
+    ctk.CTkButton(buttons, text="OK", width=90, command=submit).pack(side="left", padx=6)
+    dialog.bind("<Return>", lambda _event: submit())
+    dialog.bind("<Escape>", lambda _event: dialog.destroy())
+    dialog.wait_visibility()
+    dialog.grab_set()
+    entry.focus_set()
+    dialog.wait_window()
+    return result[0]
+
+
+def hide_monitor_share(shares):
+    return [share for share in shares if share.casefold() != MONITOR_SHARE.casefold()]
 
 
 def acquire_single_instance():
@@ -385,8 +434,6 @@ class App(ctk.CTk):
         self.saved_settings = self._read_settings()
         self.theme = "light"
         ctk.set_appearance_mode(self.theme)
-        self.style = ttk.Style(self)
-        self.style.theme_use("clam")
         self.q = queue.Queue()
         self.remote = None
         self.authenticated = False
@@ -732,60 +779,6 @@ class App(ctk.CTk):
             filesystem_bar.configure(fg_color=colors["panel"], progress_color=colors["accent"])
         for row_widgets in getattr(self, "filesystem_rows", {}).values():
             row_widgets["bar_frame"].configure(border_color=colors["border"])
-        self.style.configure(".", background=colors["background"], foreground=colors["text"])
-        self.style.configure("TFrame", background=colors["background"])
-        self.style.configure("TLabel", background=colors["background"], foreground=colors["text"])
-        self.style.configure(
-            "TLabelframe", background=colors["background"], foreground=colors["text"],
-            bordercolor=colors["border"],
-        )
-        self.style.configure(
-            "TLabelframe.Label", background=colors["background"], foreground=colors["text"],
-        )
-        self.style.configure(
-            "TButton", background=colors["panel"], foreground=colors["text"],
-            bordercolor=colors["border"], focuscolor=colors["accent"], padding=(8, 4),
-        )
-        self.style.map(
-            "TButton",
-            background=[("pressed", colors["accent"]), ("active", colors["hover"])],
-            foreground=[("pressed", colors["selected_text"])],
-        )
-        self.style.configure(
-            "TEntry", fieldbackground=colors["input"], foreground=colors["text"],
-            insertcolor=colors["text"], bordercolor=colors["border"],
-        )
-        self.style.configure(
-            "TCombobox", fieldbackground=colors["input"], foreground=colors["text"],
-            background=colors["panel"], arrowcolor=colors["text"], bordercolor=colors["border"],
-        )
-        self.style.map(
-            "TCombobox",
-            fieldbackground=[("readonly", colors["input"])],
-            foreground=[("readonly", colors["text"])],
-            selectbackground=[("readonly", colors["accent"])],
-            selectforeground=[("readonly", colors["selected_text"])],
-        )
-        self.style.configure(
-            "TSpinbox", fieldbackground=colors["input"], foreground=colors["text"],
-            background=colors["panel"], arrowcolor=colors["text"], bordercolor=colors["border"],
-        )
-        self.style.configure(
-            "Treeview", background=colors["input"], fieldbackground=colors["input"],
-            foreground=colors["text"], bordercolor=colors["border"], rowheight=24,
-        )
-        self.style.map(
-            "Treeview",
-            background=[("selected", colors["accent"])],
-            foreground=[("selected", colors["selected_text"])],
-        )
-        self.style.configure(
-            "Treeview.Heading", background=colors["panel"], foreground=colors["text"],
-            bordercolor=colors["border"], relief="flat",
-        )
-        self.style.configure("TProgressbar", background=colors["accent"], troughcolor=colors["panel"])
-        self.style.configure("TSeparator", background=colors["border"])
-
         for title, tab in self.tabs.items():
             selected = title == self.active_tab
             tab["button"].configure(
@@ -953,12 +946,12 @@ class App(ctk.CTk):
             self._save_settings()
 
     def _confirm_ssh_host_key(self, hostname, key_type, fingerprint, decision):
-        answer = simpledialog.askstring(
+        answer = ask_text_dialog(
+            self,
             "Confiar no servidor SSH",
             f"O servidor {hostname} ainda não está em known_hosts.\n"
             f"Chave: {key_type}\nFingerprint: {fingerprint}\n\n"
             "Digite yes para confiar e salvar esta chave:",
-            parent=self,
         )
         decision["accepted"] = bool(answer and answer.strip().casefold() == "yes")
         decision["event"].set()
@@ -1607,22 +1600,16 @@ class App(ctk.CTk):
         self.login_status.set(f"Acesso validado para {user} em {remote.host}.")
         self._save_settings()
         self.show_main_page()
-        self.status_share = find_public_share(shares)
+        self.status_share = MONITOR_SHARE
+        shares = hide_monitor_share(shares)
         self.path_lbl.configure(text=f"\\\\{remote.host}\\")
         self._update_dest_label()
         self._fill([("share", share) for share in shares])
         if shares:
             self.say(f"Conectado a {remote.host}. Clique em um compartilhamento para abrir.")
-            if self.status_share:
-                self._request_server_status(generation)
-            else:
-                self._reset_server_dashboard(
-                    "Compartilhamento público não encontrado. "
-                    f"O agente deve publicar {STATUS_FILENAME} na raiz dele."
-                )
         else:
             self.say(f"Conectado a {remote.host}, mas nenhum compartilhamento de disco foi encontrado.")
-            self._reset_server_dashboard("Nenhum compartilhamento disponível para consultar o agente.")
+        self._request_server_status(generation)
 
     def _reset_server_dashboard(self, message):
         self.server_overview.set(message)
@@ -1638,7 +1625,18 @@ class App(ctk.CTk):
         self._render_samba_shares([])
         self._render_physical_disks([])
 
+    def _unchanged(self, key, data):
+        # Evita reconstruir/relayout de widgets quando os dados são idênticos aos da última renderização.
+        cache = self.__dict__.setdefault("_render_cache", {})
+        signature = json.dumps(data, sort_keys=True, default=str)
+        if cache.get(key) == signature:
+            return True
+        cache[key] = signature
+        return False
+
     def _render_system_filesystems(self, filesystems):
+        if self._unchanged("filesystems", filesystems):
+            return
         current_mounts = {
             filesystem.get("mountpoint", filesystem.get("device", str(index))): filesystem
             for index, filesystem in enumerate(filesystems)
@@ -1717,6 +1715,8 @@ class App(ctk.CTk):
         ]
 
     def _render_physical_disks(self, disks):
+        if self._unchanged("disks", disks):
+            return
         current_disks = {
             disk.get("name", str(index)): disk for index, disk in enumerate(disks)
         }
@@ -1777,6 +1777,13 @@ class App(ctk.CTk):
                 row_widgets["divider"].grid_remove()
 
     def _render_samba_shares(self, shares):
+        if shares:
+            shares = [
+                share for share in shares
+                if str(share.get("browseable", "")).strip().casefold() not in ("no", "false", "0")
+            ]
+        if self._unchanged("shares", shares):
+            return
         empty_message = "Nenhum compartilhamento Samba disponível."
         if shares is None:
             current_shares = {}
@@ -1994,7 +2001,8 @@ class App(ctk.CTk):
                 "shell": system_info.get("shell", "Indisponível"),
             }
             for key, value in system_values.items():
-                self.system_info_vars[key].set(str(value))
+                if self.system_info_vars[key].get() != str(value):
+                    self.system_info_vars[key].set(str(value))
 
             cpu_percent = float(data["cpu_percent"])
             cpu_count = int(data["cpu_count"])
@@ -2111,7 +2119,7 @@ class App(ctk.CTk):
     def set_dest(self):
         remote = self.remote
         if not self.authenticated or remote is None or not self.share:
-            messagebox.showinfo("Destino", "Faça login e abra um compartilhamento primeiro.")
+            show_info_dialog(self, "Destino", "Faça login e abra um compartilhamento primeiro.")
             return
         self.dest = (self.share, self.path)
         self.dest_server = remote.host
@@ -2154,8 +2162,8 @@ class App(ctk.CTk):
     def start_backup(self):
         sources = list(self.source_paths)
         if not (self.authenticated and self.remote and self.dest and sources):
-            messagebox.showinfo(
-                "Backup", "Faça login, escolha o destino e adicione pastas de origem.",
+            show_info_dialog(
+                self, "Backup", "Faça login, escolha o destino e adicione pastas de origem.",
             )
             return
         self.cancel.clear()
@@ -2265,9 +2273,9 @@ class App(ctk.CTk):
 if __name__ == "__main__":
     instance_lock = acquire_single_instance()
     if instance_lock is None:
-        root = tk.Tk()
+        root = ctk.CTk()
         root.withdraw()
-        messagebox.showinfo("marcelino Client", "O aplicativo já está aberto.")
+        show_info_dialog(root, "marcelino Client", "O aplicativo já está aberto.")
         root.destroy()
     else:
         App().mainloop()

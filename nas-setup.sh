@@ -39,9 +39,11 @@ SHARES=(
   "Backup:/srv/nas/backup"
   "Midia:/srv/nas/midia"
   "Marcelo:/srv/marcelo"
+  "Monitor:/srv/nas/monitor"
 )
 PUBLIC_SHARES=("Publico")                          # nomes de shares acessíveis sem senha (guest)
 GROUP_SHARES=("Backup" "Midia")                    # shares acessíveis ao grupo SAMBA_GROUP
+READONLY_SHARES=("Monitor")                        # shares visíveis, somente leitura (gravados localmente pelo marcelinoServer)
 USER_SHARES=("Marcelo:marcelo" "Privado:marcelo")  # pares share:usuario acessíveis somente por esse usuário
 SAMBA_USER="marcelo"                               # usuário Samba (criado se não existir)
 SAMBA_GROUP="nasgroup"                             # grupo Samba (criado se não existir)
@@ -279,7 +281,7 @@ EOF
     mkdir -p "$path"
     category_count=0
     private_user=""
-    for category_share in "${PUBLIC_SHARES[@]}" "${GROUP_SHARES[@]}"; do
+    for category_share in "${PUBLIC_SHARES[@]}" "${GROUP_SHARES[@]}" "${READONLY_SHARES[@]}"; do
       [[ "$category_share" == "$name" ]] && ((category_count += 1))
     done
     for private_entry in "${USER_SHARES[@]}"; do
@@ -311,6 +313,21 @@ EOF
    force group = $SAMBA_GROUP
    create mask = 0666
    directory mask = 2777
+EOF
+      continue
+    fi
+    if [[ " ${READONLY_SHARES[*]:-} " == *" $name "* ]]; then
+      chown root:root "$path"
+      chmod 0755 "$path"
+      cat >> /etc/samba/smb.conf <<EOF
+
+[$name]
+   path = $path
+   browseable = no
+   read only = yes
+   guest ok = yes
+   write list =
+   admin users =
 EOF
       continue
     fi

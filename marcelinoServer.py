@@ -102,6 +102,7 @@ SHARE_ACCESS_OPTIONS = (
     "admin users",
     "guest ok",
     "read only",
+    "browseable",
 )
 
 
@@ -178,6 +179,7 @@ def collect_samba_shares(smb_config=None):
             "admin_users": effective_options.get("admin users", ""),
             "guest_ok": effective_options.get("guest ok", ""),
             "read_only": effective_options.get("read only", ""),
+            "browseable": effective_options.get("browseable", ""),
         })
     return shares
 
@@ -186,7 +188,7 @@ def _samba_share_paths(config_path):
     return list(_samba_share_entries(config_path).values())
 
 
-def find_public_share_path(smb_config=None, share_name="public"):
+def find_public_share_path(smb_config=None, share_name="Monitor"):
     config_path = Path(smb_config or "/etc/samba/smb.conf")
     if not config_path.is_file():
         raise FileNotFoundError(f"Arquivo de configuração SMB não encontrado: {config_path}")
@@ -194,7 +196,7 @@ def find_public_share_path(smb_config=None, share_name="public"):
         name.casefold(): Path(path)
         for name, path in _samba_share_entries(config_path).items()
     }
-    candidates = (share_name, "public", "publico", "público")
+    candidates = (share_name, "monitor", "public", "publico", "público")
     for candidate in dict.fromkeys(name.casefold() for name in candidates if name):
         if candidate in shares:
             return shares[candidate]
@@ -619,8 +621,8 @@ def main():
     )
     parser.add_argument("--smb-config", type=Path, help="caminho do smb.conf no Linux")
     parser.add_argument(
-        "--public-share", default="public",
-        help="nome do compartilhamento público no smb.conf (padrão: public)",
+        "--public-share", default="Monitor",
+        help="nome do compartilhamento somente leitura no smb.conf (padrão: Monitor)",
     )
     parser.add_argument(
         "--file-mode",
