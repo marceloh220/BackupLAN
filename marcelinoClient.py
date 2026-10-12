@@ -7,6 +7,7 @@ import threading
 import codecs
 import base64
 import hashlib
+import time
 from datetime import datetime, timezone
 import tkinter as tk
 import customtkinter as ctk
@@ -397,6 +398,7 @@ class App(ctk.CTk):
         self.ssh_screen = None
         self.ssh_stream = None
         self.ssh_decoder = None
+        self.ssh_rendered_rows: list[object] = []
         self.ssh_style_tags = {}
         self.ssh_screen_dirty = False
         self.ssh_generation = 0
@@ -1028,6 +1030,7 @@ class App(ctk.CTk):
         self.ssh_screen = pyte.Screen(120, 24)
         self.ssh_stream = pyte.Stream(self.ssh_screen)
         self.ssh_decoder = codecs.getincrementaldecoder("utf-8")("replace")
+        self.ssh_rendered_rows = []
         self.ssh_style_tags = {}
         channel.settimeout(0.05)
         remote = self.remote
@@ -1126,35 +1129,54 @@ class App(ctk.CTk):
         return default
 
     def _render_ssh_screen(self):
-        if self.ssh_screen is None:
+        screen = self.ssh_screen
+        if screen is None:
             return
         terminal_widget = self.terminal_output._textbox
-        terminal_widget.delete("1.0", "end")
-        for row_index in range(self.ssh_screen.lines):
-            row = self.ssh_screen.buffer[row_index]
-            current_style = None
-            run = []
-            for column in range(self.ssh_screen.columns):
+        if len(self.ssh_rendered_rows) != screen.lines:
+            terminal_widget.delete("1.0", "end")
+            terminal_widget.insert("1.0", "\n" * (screen.lines - 1))
+            self.ssh_rendered_rows = [None] * screen.lines
+        for row_index in range(screen.lines):
+            row = screen.buffer[row_index]
+            rendered_row = []
+            for column in range(screen.columns):
                 cell = row[column]
                 style = (
                     cell.fg, cell.bg, cell.bold, cell.italics,
                     cell.underscore, cell.reverse,
                 )
+                rendered_row.append((cell.data or " ", style))
+            signature = tuple(rendered_row)
+            if self.ssh_rendered_rows[row_index] == signature:
+                continue
+
+            line = row_index + 1
+            terminal_widget.delete(f"{line}.0", f"{line}.end")
+            current_style = None
+            run = []
+            run_start = 0
+            for cell_text, style in signature:
                 if current_style is not None and style != current_style:
-                    self._insert_ssh_run(terminal_widget, run, current_style)
+                    self._insert_ssh_run(
+                        terminal_widget, run, current_style, f"{line}.{run_start}",
+                    )
+                    run_start += len(run)
                     run = []
                 current_style = style
-                run.append(cell.data or " ")
+                run.append(cell_text)
             if run:
-                self._insert_ssh_run(terminal_widget, run, current_style)
-            if row_index < self.ssh_screen.lines - 1:
-                terminal_widget.insert("end", "\n")
+                self._insert_ssh_run(
+                    terminal_widget, run, current_style, f"{line}.{run_start}",
+                )
+            self.ssh_rendered_rows[row_index] = signature
 
-        cursor = self.ssh_screen.cursor
+        cursor = screen.cursor
         terminal_widget.mark_set("insert", f"{cursor.y + 1}.{cursor.x}")
+        terminal_widget.see(f"{cursor.y + 1}.{cursor.x}")
         self.ssh_screen_dirty = False
 
-    def _insert_ssh_run(self, terminal_widget, run, style):
+    def _insert_ssh_run(self, terminal_widget, run, style, index="end"):
         tag = self.ssh_style_tags.get(style)
         if tag is None:
             tag = f"ssh_style_{len(self.ssh_style_tags)}"
@@ -1171,7 +1193,7 @@ class App(ctk.CTk):
                 tag, foreground=foreground, background=background,
                 font=font_style, underline=style[4],
             )
-        terminal_widget.insert("end", "".join(run), (tag,))
+        terminal_widget.insert(index, "".join(run), (tag,))
 
     def _ssh_channel_closed(self, generation):
         if generation != self.ssh_generation:
@@ -1190,6 +1212,7 @@ class App(ctk.CTk):
         self.ssh_screen = None
         self.ssh_stream = None
         self.ssh_decoder = None
+        self.ssh_rendered_rows = []
         self.ssh_style_tags = {}
         self.ssh_screen_dirty = False
         if hasattr(self, "terminal_output"):
@@ -1434,8 +1457,15 @@ class App(ctk.CTk):
         self.q.put(("log", msg))
 
     def _pump(self):
-        while not self.q.empty():
-            kind, val = self.q.get()
+        max_items = 100
+        processed = 0
+        latest_progress = None
+        while processed < max_items:
+            try:
+                kind, val = self.q.get_nowait()
+            except queue.Empty:
+                break
+            processed += 1
             if kind == "log":
                 self.log.configure(state="normal")
                 self.log.insert("end", val + "\n")
@@ -1446,18 +1476,21 @@ class App(ctk.CTk):
                 self.hosts[f"{name} ({ip})"] = (ip, name)
                 self.host_cb.configure(values=sorted(self.hosts))
             elif kind == "progress":
-                done, total = val
-                progress = done / total if total else 1
-                self.bar.set(progress)
-                self.bar_lbl.configure(text=f"{progress:.0%} ({done}/{total} arquivos)")
+                latest_progress = val
             elif kind == "ssh_data":
                 generation, data = val
                 self._feed_ssh_output(generation, data)
             elif kind == "call":
                 val()
+        if latest_progress is not None:
+            done, total = latest_progress
+            progress = done / total if total else 1
+            self.bar.set(progress)
+            self.bar_lbl.configure(text=f"{progress:.0%} ({done}/{total} arquivos)")
         if self.ssh_screen_dirty:
             self._render_ssh_screen()
-        self.after(20 if self.ssh_channel else 100, self._pump)
+        delay = 1 if processed == max_items else (20 if self.ssh_channel else 100)
+        self.after(delay, self._pump)
 
     def ui(self, fn):
         self.q.put(("call", fn))
@@ -2140,7 +2173,15 @@ class App(ctk.CTk):
         max_workers = 4
         pending = set()
         cancelled = False
+        last_progress_update = time.monotonic()
         self.q.put(("progress", (0, total)))
+
+        def report_progress(force=False):
+            nonlocal last_progress_update
+            now = time.monotonic()
+            if force or now - last_progress_update >= 0.1:
+                self.q.put(("progress", (done, total)))
+                last_progress_update = now
 
         def transfer_file(local_path, remote_path):
             if self.cancel.is_set():
@@ -2166,7 +2207,6 @@ class App(ctk.CTk):
                 result, local_path, error = future.result()
                 if result == "sent":
                     sent += 1
-                    self.say(f"OK {local_path}")
                 elif result == "skipped":
                     skipped += 1
                 elif result == "failed":
@@ -2175,7 +2215,7 @@ class App(ctk.CTk):
                 else:
                     continue
                 done += 1
-                self.q.put(("progress", (done, total)))
+                report_progress()
 
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
             for src in sources:
@@ -2195,7 +2235,7 @@ class App(ctk.CTk):
                         self.say(f"Erro criando {rdir}: {error}")
                         failed += len(files)
                         done += len(files)
-                        self.q.put(("progress", (done, total)))
+                        report_progress()
                         continue
                     for filename in files:
                         if self.cancel.is_set():
@@ -2214,6 +2254,7 @@ class App(ctk.CTk):
             while pending:
                 record_completed(block=True)
 
+        report_progress(force=True)
         if cancelled or self.cancel.is_set():
             self.say(f"Backup cancelado: {sent} enviados, {skipped} inalterados, {failed} falhas.")
         else:
