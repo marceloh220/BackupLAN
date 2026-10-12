@@ -1317,8 +1317,6 @@ class App(ctk.CTk):
             ("Núcleos físicos/lógicos", "cpu_cores"),
             ("GPU", "gpu_models"),
             ("Pacotes instalados", "packages"),
-            ("Desktop", "desktop_environment"),
-            ("Gerenciador de janelas", "window_manager"),
             ("Fonte padrão", "font"),
             ("Shell", "shell"),
         )
@@ -1941,8 +1939,6 @@ class App(ctk.CTk):
                 ),
                 "gpu_models": "\n".join(gpu_models) if gpu_models else "Indisponível",
                 "packages": packages,
-                "desktop_environment": system_info.get("desktop_environment", "Indisponível"),
-                "window_manager": system_info.get("window_manager", "Indisponível"),
                 "font": system_info.get("font", "Indisponível"),
                 "shell": system_info.get("shell", "Indisponível"),
             }

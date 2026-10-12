@@ -387,11 +387,17 @@ def _read_os_name():
 
 def _read_cpu_model():
     try:
+        cpu_info = {}
         for line in Path("/proc/cpuinfo").read_text(encoding="utf-8", errors="replace").splitlines():
             key, separator, value = line.partition(":")
-            if separator and key.strip().casefold() in ("model name", "hardware", "processor"):
-                if value.strip():
-                    return value.strip()
+            normalized_key = key.strip().casefold()
+            if separator and normalized_key in ("model name", "model", "hardware", "processor"):
+                cpu_info.setdefault(normalized_key, value.strip())
+
+        for key in ("model name", "model", "hardware", "processor"):
+            value = cpu_info.get(key, "")
+            if value and not value.isdecimal():
+                return value
     except OSError:
         pass
     return platform.processor() or "Indisponível"
@@ -439,22 +445,6 @@ def _read_package_count():
     return {"manager": "Indisponível", "count": None}
 
 
-def _read_window_manager():
-    known_managers = {
-        "hyprland": "Hyprland", "sway": "Sway", "kwin_wayland": "KWin",
-        "kwin_x11": "KWin", "mutter": "Mutter", "xfwm4": "Xfwm4",
-        "openbox": "Openbox", "i3": "i3", "bspwm": "bspwm", "awesome": "Awesome",
-    }
-    try:
-        for process in psutil.process_iter(["name"]):
-            name = (process.info.get("name") or "").casefold()
-            if name in known_managers:
-                return known_managers[name]
-    except (OSError, psutil.Error):
-        pass
-    return "Indisponível"
-
-
 def _read_gpu_models():
     lspci = shutil.which("lspci")
     if not lspci:
@@ -498,22 +488,6 @@ def _read_package_count():
     return {"manager": "Indisponível", "count": None}
 
 
-def _read_window_manager():
-    known_managers = {
-        "hyprland": "Hyprland", "sway": "Sway", "kwin_wayland": "KWin",
-        "kwin_x11": "KWin", "mutter": "Mutter", "xfwm4": "Xfwm4",
-        "openbox": "Openbox", "i3": "i3", "bspwm": "bspwm", "awesome": "Awesome",
-    }
-    try:
-        for process in psutil.process_iter(["name"]):
-            name = (process.info.get("name") or "").casefold()
-            if name in known_managers:
-                return known_managers[name]
-    except (OSError, psutil.Error):
-        pass
-    return "Indisponível"
-
-
 def collect_system_info():
     shell = os.environ.get("SHELL")
     if not shell:
@@ -526,18 +500,10 @@ def collect_system_info():
     fc_match = shutil.which("fc-match")
     default_font = _run_text_command([fc_match, "-f", "%{family}", "sans"], timeout=5) if fc_match else ""
 
-    desktop = (
-        os.environ.get("XDG_CURRENT_DESKTOP")
-        or os.environ.get("XDG_SESSION_DESKTOP")
-        or os.environ.get("DESKTOP_SESSION")
-        or "Sem ambiente gráfico no serviço"
-    )
     return {
         "os_name": _read_os_name(),
         "kernel": platform.release(),
         "package_count": _read_package_count(),
-        "desktop_environment": desktop,
-        "window_manager": _read_window_manager(),
         "font": default_font or "Indisponível",
         "shell": shell or "Indisponível",
         "computer_model": _read_computer_model(),
