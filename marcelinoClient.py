@@ -18,6 +18,7 @@ import tempfile
 import pystray
 import paramiko
 import pyte
+from pyte.graphics import FG_BG_256
 from types import SimpleNamespace
 from pathlib import Path
 
@@ -443,8 +444,11 @@ class App(ctk.CTk):
         threading.Thread(target=self._run_tray_icon, daemon=True).start()
 
     def _run_tray_icon(self):
+        icon = self._tray_icon
+        if icon is None:
+            return
         try:
-            self._tray_icon.run()
+            icon.run()
         except Exception as error:
             if not self._closing:
                 self.say(f"Não foi possível iniciar o ícone da bandeja: {error}")
@@ -593,7 +597,11 @@ class App(ctk.CTk):
             selection = server.get("selection")
             ip = server.get("ip")
             name = server.get("name")
-            if all(isinstance(value, str) and value for value in (selection, ip, name)):
+            if (
+                isinstance(selection, str) and selection
+                and isinstance(ip, str) and ip
+                and isinstance(name, str) and name
+            ):
                 self.saved_server = {"selection": selection, "ip": ip, "name": name}
                 self.hosts[selection] = (ip, name)
                 self.host_cb.configure(values=sorted(self.hosts))
@@ -1022,7 +1030,11 @@ class App(ctk.CTk):
         self.ssh_decoder = codecs.getincrementaldecoder("utf-8")("replace")
         self.ssh_style_tags = {}
         channel.settimeout(0.05)
-        self.ssh_status.set(f"Conectado: {self.authenticated_user}@{self.remote.host}")
+        remote = self.remote
+        if remote is None:
+            self._close_ssh()
+            return
+        self.ssh_status.set(f"Conectado: {self.authenticated_user}@{remote.host}")
         self.ssh_screen_dirty = True
         self.terminal_output._textbox.focus_set()
         threading.Thread(
@@ -1087,11 +1099,13 @@ class App(ctk.CTk):
         self.ui(lambda: self._ssh_channel_closed(generation))
 
     def _feed_ssh_output(self, generation, data):
-        if generation != self.ssh_generation or self.ssh_stream is None:
+        stream = self.ssh_stream
+        decoder = self.ssh_decoder
+        if generation != self.ssh_generation or stream is None or decoder is None:
             return
-        text = self.ssh_decoder.decode(data)
+        text = decoder.decode(data)
         if text:
-            self.ssh_stream.feed(text)
+            stream.feed(text)
             self.ssh_screen_dirty = True
 
     @staticmethod
@@ -1106,7 +1120,7 @@ class App(ctk.CTk):
         if color == "default":
             return default
         if color in palette:
-            return "#" + pyte.graphics.FG_BG_256[palette[color]]
+            return "#" + FG_BG_256[palette[color]]
         if len(color) == 6:
             return "#" + color
         return default
@@ -1460,10 +1474,13 @@ class App(ctk.CTk):
         self.host_cb.focus_set()
 
     def show_main_page(self):
+        remote = self.remote
+        if remote is None:
+            return
         self.login_page.pack_forget()
         if not self.main_page.winfo_manager():
             self.main_page.pack(fill="both", expand=True)
-        self.session_display.set(f"{self.authenticated_user} @ {self.remote.host}")
+        self.session_display.set(f"{self.authenticated_user} @ {remote.host}")
         self.select_tab("Sistema")
 
     # ---- descoberta / conexão
@@ -1727,6 +1744,7 @@ class App(ctk.CTk):
                 row_widgets["divider"].grid_remove()
 
     def _render_samba_shares(self, shares):
+        empty_message = "Nenhum compartilhamento Samba disponível."
         if shares is None:
             current_shares = {}
             self.samba_share_status.set(
@@ -2000,17 +2018,20 @@ class App(ctk.CTk):
 
     # ---- navegação remota
     def refresh(self):
-        if not self.authenticated or not self.remote or not self.share:
+        remote = self.remote
+        share = self.share
+        path = self.path
+        if not self.authenticated or remote is None or not share:
             return
-        location = f"\\\\{self.remote.host}\\{self.share}"
-        if self.path:
-            location += "\\" + self.path.replace("/", "\\")
+        location = f"\\\\{remote.host}\\{share}"
+        if path:
+            location += "\\" + path.replace("/", "\\")
         self.path_lbl.configure(text=location)
 
         def run():
             try:
                 entries = [("dir" if i.isDirectory else "file", i.filename)
-                           for i in self.remote.list(self.share, self.path)]
+                           for i in remote.list(share, path)]
                 entries.sort(key=lambda e: (e[0] != "dir", e[1].lower()))
                 entries.insert(0, ("up", ".."))
                 self.ui(lambda: self._fill(entries))
@@ -2055,11 +2076,12 @@ class App(ctk.CTk):
         self.refresh()
 
     def set_dest(self):
-        if not self.authenticated or not self.share:
+        remote = self.remote
+        if not self.authenticated or remote is None or not self.share:
             messagebox.showinfo("Destino", "Faça login e abra um compartilhamento primeiro.")
             return
         self.dest = (self.share, self.path)
-        self.dest_server = self.remote.host
+        self.dest_server = remote.host
         self._update_dest_label()
         self._save_settings()
 
@@ -2107,7 +2129,11 @@ class App(ctk.CTk):
         threading.Thread(target=self.backup, args=(sources,), daemon=True).start()
 
     def backup(self, sources):
-        share, base = self.dest
+        remote = self.remote
+        destination = self.dest
+        if remote is None or destination is None:
+            return
+        share, base = destination
         sent = skipped = failed = 0
         total = sum(len(fs) for s in sources for _, _, fs in os.walk(s))
         done = 0
@@ -2120,9 +2146,9 @@ class App(ctk.CTk):
             if self.cancel.is_set():
                 return "cancelled", local_path, ""
             try:
-                if self.remote.up_to_date(share, remote_path, local_path):
+                if remote.up_to_date(share, remote_path, local_path):
                     return "skipped", local_path, ""
-                self.remote.upload(share, remote_path, local_path)
+                remote.upload(share, remote_path, local_path)
                 return "sent", local_path, ""
             except Exception as error:
                 return "failed", local_path, str(error)
@@ -2164,7 +2190,7 @@ class App(ctk.CTk):
                     rel = os.path.relpath(dirpath, src).replace("\\", "/")
                     rdir = f"{base}/{root_name}" + ("" if rel == "." else f"/{rel}")
                     try:
-                        self.remote.ensure_dir(share, rdir)
+                        remote.ensure_dir(share, rdir)
                     except Exception as error:
                         self.say(f"Erro criando {rdir}: {error}")
                         failed += len(files)

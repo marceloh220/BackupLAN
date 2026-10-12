@@ -418,37 +418,6 @@ def _read_gpu_models():
     lspci = shutil.which("lspci")
     if not lspci:
         return []
-    output = _run_text_command([lspci, "-Dnn"], timeout=10)
-    return [
-        line.split(":", 3)[-1].strip()
-        for line in output.splitlines()
-        if any(kind in line.casefold() for kind in (
-            "vga compatible controller", "3d controller", "display controller",
-        ))
-    ]
-
-
-def _read_package_count():
-    managers = (
-        ("pacman", ["pacman", "-Qq"]),
-        ("dpkg", ["dpkg-query", "-f=${binary:Package}\\n", "-W"]),
-        ("rpm", ["rpm", "-qa"]),
-    )
-    for manager, command in managers:
-        executable = shutil.which(command[0])
-        if not executable:
-            continue
-        command[0] = executable
-        output = _run_text_command(command, timeout=30)
-        if output:
-            return {"manager": manager, "count": len(output.splitlines())}
-    return {"manager": "Indisponível", "count": None}
-
-
-def _read_gpu_models():
-    lspci = shutil.which("lspci")
-    if not lspci:
-        return []
     try:
         result = subprocess.run(
             [lspci, "-Dnn"], capture_output=True, text=True, encoding="utf-8",
@@ -493,7 +462,9 @@ def collect_system_info():
     if not shell:
         try:
             import pwd
-            shell = pwd.getpwuid(os.getuid()).pw_shell
+            getuid = getattr(os, "getuid", None)
+            getpwuid = getattr(pwd, "getpwuid", None)
+            shell = getpwuid(getuid()).pw_shell if getuid and getpwuid else "Indisponível"
         except (ImportError, KeyError, OSError):
             shell = "Indisponível"
 
