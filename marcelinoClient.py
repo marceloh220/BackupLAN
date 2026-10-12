@@ -3,6 +3,7 @@ import queue
 import json
 import socket
 import subprocess
+import sys
 import threading
 import codecs
 import base64
@@ -711,13 +712,13 @@ class App(ctk.CTk):
 
     def _update_dest_label(self):
         if not self.dest:
-            self.dest_lbl.configure(text="Destino: (nenhum)")
+            self.dest_lbl.configure(text="⇥ Destino: (nenhum)")
             return
         share, path = self.dest
         location = f"\\\\{self.dest_server}\\{share}" if self.dest_server else f"\\\\{share}"
         if path:
             location += "\\" + path.replace("/", "\\")
-        self.dest_lbl.configure(text=f"Destino: {location}")
+        self.dest_lbl.configure(text=f"⇥ Destino: {location}")
 
     def _build(self):
         self.login_page = ctk.CTkFrame(self, fg_color="transparent")
@@ -726,7 +727,7 @@ class App(ctk.CTk):
         self.main_page = ctk.CTkFrame(self, fg_color="transparent")
         session_bar = ctk.CTkFrame(self.main_page, fg_color="transparent")
         session_bar.pack(fill="x", padx=8, pady=(8, 0))
-        ctk.CTkLabel(session_bar, text="Sessão").pack(side="left", padx=(4, 8))
+        ctk.CTkLabel(session_bar, text="◉ Sessão").pack(side="left", padx=(4, 8))
         self.session_display = tk.StringVar(value="Não autenticado")
         ctk.CTkEntry(
             session_bar, textvariable=self.session_display, state="disabled", width=300,
@@ -854,7 +855,7 @@ class App(ctk.CTk):
         mid = ctk.CTkFrame(page, fg_color="transparent")
         mid.pack(fill="both", expand=True, padx=8)
 
-        remote_panel = self._section(mid, "Arquivos compartilhados (destino)")
+        remote_panel = self._section(mid, "▣ Arquivos compartilhados (destino)")
         remote_panel.pack(side="left", fill="both", expand=True, padx=(0, 4), pady=4)
         self.path_lbl = ctk.CTkLabel(remote_panel, text="-", anchor="w")
         self.path_lbl.pack(fill="x", padx=10, pady=(2, 4))
@@ -864,21 +865,21 @@ class App(ctk.CTk):
         self._accent_button(
             remote_panel, text="Usar esta pasta como destino", command=self.set_dest,
         ).pack(pady=4)
-        self.dest_lbl = ctk.CTkLabel(remote_panel, text="Destino: (nenhum)", anchor="w")
+        self.dest_lbl = ctk.CTkLabel(remote_panel, text="⇥ Destino: (nenhum)", anchor="w")
         self.dest_lbl.pack(fill="x", padx=10, pady=(2, 8))
 
-        source_panel = self._section(mid, "Pastas locais (origem)")
+        source_panel = self._section(mid, "📁 Pastas locais (origem)")
         source_panel.pack(side="left", fill="both", expand=True, padx=(4, 0), pady=4)
         self.source_paths = []
         self.source_row_widgets = []
         self.src = ctk.CTkScrollableFrame(source_panel, fg_color="transparent")
         self.src.pack(fill="both", expand=True, padx=6, pady=4)
-        self._accent_button(source_panel, text="Adicionar pasta", command=self.add_src).pack(pady=8)
+        self._accent_button(source_panel, text="＋ Adicionar pasta", command=self.add_src).pack(pady=8)
 
         act = ctk.CTkFrame(page, fg_color="transparent")
         act.pack(fill="x", padx=8, pady=4)
-        self._accent_button(act, text="Iniciar backup", command=self.start_backup).pack(side="left")
-        self._accent_button(act, text="Cancelar", command=self.cancel.set).pack(side="left", padx=4)
+        self._accent_button(act, text="▶ Iniciar backup", command=self.start_backup).pack(side="left")
+        self._accent_button(act, text="■ Cancelar", command=self.cancel.set).pack(side="left", padx=4)
         self.bar = ctk.CTkProgressBar(
             act,
             fg_color=self.theme_colors["panel"],
@@ -886,7 +887,7 @@ class App(ctk.CTk):
         )
         self.bar.set(0)
         self.bar.pack(side="left", fill="x", expand=True, padx=8)
-        self.bar_lbl = ctk.CTkLabel(act, text="0%", width=130)
+        self.bar_lbl = ctk.CTkLabel(act, text="⏳ 0%", width=130)
         self.bar_lbl.pack(side="left")
         self.log = ctk.CTkTextbox(page, height=100, state="disabled", corner_radius=8)
         self.log.pack(fill="x", padx=8, pady=(0, 8))
@@ -905,7 +906,7 @@ class App(ctk.CTk):
 
         key_controls = ctk.CTkFrame(page, fg_color="transparent")
         key_controls.pack(fill="x", padx=8, pady=(0, 8))
-        ctk.CTkLabel(key_controls, text="Arquivo de chave").pack(side="left", padx=(0, 6))
+        ctk.CTkLabel(key_controls, text="🔑 Arquivo de chave").pack(side="left", padx=(0, 6))
         self.ssh_key_path = tk.StringVar()
         key_path_entry = ctk.CTkEntry(
             key_controls, textvariable=self.ssh_key_path,
@@ -919,7 +920,7 @@ class App(ctk.CTk):
         self._accent_button(
             key_controls, text="Selecionar...", command=self._select_ssh_key,
         ).pack(side="left", padx=6)
-        ctk.CTkLabel(key_controls, text="Passphrase").pack(side="left", padx=(4, 6))
+        ctk.CTkLabel(key_controls, text="🔒 Passphrase").pack(side="left", padx=(4, 6))
         self.ssh_key_passphrase_entry = ctk.CTkEntry(
             key_controls, width=160, show="*", placeholder_text="Opcional",
             fg_color=THEME_PALETTE["input"],
@@ -1252,21 +1253,21 @@ class App(ctk.CTk):
             dropdown_hover_color=THEME_PALETTE["hover"],
             dropdown_text_color=THEME_PALETTE["text"],
         )
-        ctk.CTkLabel(login, text="Servidor").grid(row=1, column=0, padx=8, pady=6, sticky="e")
+        ctk.CTkLabel(login, text="🖥 Servidor").grid(row=1, column=0, padx=8, pady=6, sticky="e")
         self.host_cb.grid(row=1, column=1, padx=4, pady=6)
-        self._accent_button(login, text="Procurar na rede", command=self.scan).grid(
+        self._accent_button(login, text="⌕ Procurar na rede", command=self.scan).grid(
             row=1, column=2, padx=4, pady=6,
         )
         self.user = tk.StringVar()
         self.pwd = tk.StringVar()
-        ctk.CTkLabel(login, text="Usuário").grid(row=2, column=0, padx=8, pady=6, sticky="e")
+        ctk.CTkLabel(login, text="♟ Usuário").grid(row=2, column=0, padx=8, pady=6, sticky="e")
         ctk.CTkEntry(
             login, textvariable=self.user, width=220,
             fg_color=THEME_PALETTE["input"],
             text_color=THEME_PALETTE["text"],
             placeholder_text_color=THEME_PALETTE["muted"],
         ).grid(row=2, column=1, padx=4, pady=6)
-        ctk.CTkLabel(login, text="Senha").grid(row=2, column=2, padx=4, pady=6, sticky="e")
+        ctk.CTkLabel(login, text="🔒 Senha").grid(row=2, column=2, padx=4, pady=6, sticky="e")
         password_entry = ctk.CTkEntry(
             login, textvariable=self.pwd, show="*", width=220,
             fg_color=THEME_PALETTE["input"],
@@ -1275,7 +1276,7 @@ class App(ctk.CTk):
         )
         password_entry.grid(row=2, column=3, padx=4, pady=6)
         password_entry.bind("<Return>", self._login_on_enter)
-        self._accent_button(login, text="Validar e conectar", command=self.connect).grid(
+        self._accent_button(login, text="↪ Validar e conectar", command=self.connect).grid(
             row=2, column=4, padx=8, pady=6,
         )
         self.login_status = tk.StringVar(value="Selecione um servidor e informe usuário e senha.")
@@ -1289,7 +1290,7 @@ class App(ctk.CTk):
         summary.pack(fill="x", padx=2, pady=(0, 4))
         controls = ctk.CTkFrame(summary, fg_color="transparent")
         controls.pack(fill="x", padx=8, pady=(0, 4))
-        ctk.CTkLabel(controls, text="Atualizar a cada").pack(side="left", padx=(0, 4))
+        ctk.CTkLabel(controls, text="⟳ Atualizar a cada").pack(side="left", padx=(0, 4))
         self.status_interval_var = tk.StringVar(
             value=str(self.saved_settings.get("status_interval_seconds", 5)),
         )
@@ -1310,15 +1311,15 @@ class App(ctk.CTk):
             command=self._status_interval_changed,
         ).pack(side="left", padx=4)
         ctk.CTkLabel(controls, text="segundos").pack(side="left", padx=(0, 8))
-        self._accent_button(controls, text="Atualizar agora", command=self.refresh_server_status).pack(side="left", padx=4)
+        self._accent_button(controls, text="⟳ Atualizar agora", command=self.refresh_server_status).pack(side="left", padx=4)
 
         self.server_overview = tk.StringVar(value="Aguardando autenticação.")
         VariableLabel(summary, self.server_overview).pack(anchor="w", padx=12, pady=(0, 6))
         metrics = ctk.CTkFrame(summary, fg_color="transparent")
         metrics.pack(fill="x", padx=8, pady=(0, 8))
         self.metric_rings = {
-            "cpu": MetricRing(metrics, "CPU", THEME_PALETTE["panel"]),
-            "memory": MetricRing(metrics, "Memória", THEME_PALETTE["panel"]),
+            "cpu": MetricRing(metrics, "⚙ CPU", THEME_PALETTE["panel"]),
+            "memory": MetricRing(metrics, "▤ Memória", THEME_PALETTE["panel"]),
         }
         self.metric_rings["cpu"].grid(row=0, column=0, sticky="nsew", padx=3, pady=3)
         self.metric_rings["memory"].grid(row=0, column=1, sticky="nsew", padx=3, pady=3)
@@ -1326,7 +1327,7 @@ class App(ctk.CTk):
             "uptime": tk.StringVar(value="--"),
             "network": tk.StringVar(value="--"),
         }
-        for column, (title, key) in enumerate((("Tempo ativo", "uptime"), ("Rede", "network")), start=2):
+        for column, (title, key) in enumerate((("◷ Tempo ativo", "uptime"), ("↔ Rede", "network")), start=2):
             panel = self._section(metrics, title)
             panel.grid(row=0, column=column, sticky="nsew", padx=3, pady=3)
             VariableLabel(panel, self.metric_vars[key], anchor="center").pack(
@@ -1340,15 +1341,15 @@ class App(ctk.CTk):
         identity_grid = ctk.CTkFrame(identity, fg_color="transparent")
         identity_grid.pack(fill="x", padx=8, pady=(0, 8))
         system_fields = (
-            ("Sistema operacional", "os_name"),
-            ("Kernel", "kernel"),
-            ("Modelo do computador", "computer_model"),
-            ("Processador", "cpu_model"),
-            ("Núcleos físicos/lógicos", "cpu_cores"),
-            ("GPU", "gpu_models"),
-            ("Pacotes instalados", "packages"),
-            ("Fonte padrão", "font"),
-            ("Shell", "shell"),
+            ("🖥 Sistema operacional", "os_name"),
+            ("⚙ Kernel", "kernel"),
+            ("▣ Modelo do computador", "computer_model"),
+            ("⚡ Processador", "cpu_model"),
+            ("◉ Núcleos físicos/lógicos", "cpu_cores"),
+            ("▰ GPU", "gpu_models"),
+            ("▤ Pacotes instalados", "packages"),
+            ("Aa Fonte padrão", "font"),
+            (">_ Shell", "shell"),
         )
         self.system_info_vars = {key: tk.StringVar(value="Indisponível") for _, key in system_fields}
         for index, (label, key) in enumerate(system_fields):
@@ -1377,10 +1378,38 @@ class App(ctk.CTk):
 
         storage = ctk.CTkFrame(content, fg_color="transparent")
         storage.pack(fill="x", padx=8, pady=4)
-        filesystems = self._section(storage, "Sistemas de arquivos montados")
+        filesystems = self._section(storage, "▤ Sistemas de arquivos montados")
         filesystems.pack(fill="x", pady=(0, 4))
         self.filesystem_bars_container = ctk.CTkFrame(filesystems, fg_color="transparent")
         self.filesystem_bars_container.pack(fill="x", padx=8, pady=(0, 8))
+        filesystem_header = ctk.CTkFrame(
+            self.filesystem_bars_container, fg_color="transparent",
+        )
+        filesystem_header.pack(fill="x", padx=2, pady=(0, 4))
+        for column, weight, minsize in (
+            (0, 2, 220), (1, 2, 175), (2, 1, 110), (3, 0, 174), (4, 0, 210),
+        ):
+            filesystem_header.grid_columnconfigure(column, weight=weight, minsize=minsize)
+        header_paddings = ((4, 12), (0, 12), (0, 12), (0, 12), (0, 4))
+        for column, (title, anchor) in enumerate((
+            ("⌂ Montagem", "w"),
+            ("▣ Dispositivo", "w"),
+            ("▤ Formato", "w"),
+            ("◴ Ocupação", "w"),
+            ("◫ Espaço livre", "e"),
+        )):
+            ctk.CTkLabel(
+                filesystem_header,
+                text=title,
+                anchor=anchor,
+                font=ctk.CTkFont(size=11, weight="bold"),
+                text_color=THEME_PALETTE["muted"],
+            ).grid(
+                row=0,
+                column=column,
+                sticky="ew",
+                padx=header_paddings[column],
+            )
         self.filesystem_rows = {}
         self.filesystem_progress_bars = []
         self.filesystem_empty_label = None
@@ -1393,7 +1422,7 @@ class App(ctk.CTk):
             (0, 1, 150), (1, 3, 220), (2, 1, 150), (3, 1, 150), (4, 1, 140),
         ):
             self.physical_disk_grid.grid_columnconfigure(column, weight=weight, minsize=minsize)
-        for column, title in enumerate(("Dispositivo", "Modelo", "Capacidade", "Temperatura", "SMART")):
+        for column, title in enumerate(("▣ Dispositivo", "▤ Modelo", "◫ Capacidade", "🌡 Temperatura", "✓ SMART")):
             ctk.CTkLabel(
                 self.physical_disk_grid,
                 text=title,
@@ -1409,9 +1438,16 @@ class App(ctk.CTk):
         self.samba_share_panel = self._section(page, "Compartilhamentos Samba")
         self.samba_share_panel.pack(fill="both", expand=True, padx=8, pady=4)
         self.samba_share_status = tk.StringVar(value="Aguardando dados do servidor.")
-        VariableLabel(self.samba_share_panel, self.samba_share_status).pack(
-            anchor="w", padx=12, pady=(2, 4),
+        share_toolbar = ctk.CTkFrame(self.samba_share_panel, fg_color="transparent")
+        share_toolbar.pack(fill="x", padx=12, pady=(2, 4))
+        VariableLabel(share_toolbar, self.samba_share_status).pack(
+            side="left", fill="x", expand=True, anchor="w",
         )
+        self._accent_button(
+            share_toolbar,
+            text="📂 Abrir Compartilhamentos",
+            command=self._open_server_shares,
+        ).pack(side="right", padx=(8, 0))
         self.samba_share_grid = ctk.CTkFrame(self.samba_share_panel, fg_color="transparent")
         self.samba_share_grid.pack(fill="both", expand=True, padx=8, pady=(0, 8))
         self.samba_share_column_specs = (
@@ -1433,8 +1469,8 @@ class App(ctk.CTk):
                 column, weight=weight, minsize=minsize,
             )
         for column, title in enumerate((
-            "Compartilhamento", "Caminho", "Usuários/grupos permitidos",
-            "Somente leitura", "Leitura e escrita",
+            "▣ Compartilhamento", "⌂ Caminho", "♟ Usuários/grupos permitidos",
+            "◉ Somente leitura", "✎ Leitura e escrita",
         )):
             ctk.CTkLabel(
                 self.samba_share_header,
@@ -1444,6 +1480,29 @@ class App(ctk.CTk):
             ).grid(row=0, column=column, sticky="ew", padx=(4, 12), pady=(0, 4))
         self.samba_share_rows = {}
         self.samba_share_empty_label = None
+
+    def _open_server_shares(self):
+        if not self.authenticated or self.remote is None:
+            show_info_dialog(
+                self,
+                "Compartilhamentos",
+                "Faça login no servidor antes de abrir as pastas compartilhadas.",
+            )
+            return
+
+        host = self.remote.host
+        try:
+            if os.name == "nt":
+                subprocess.Popen(["explorer.exe", f"\\\\{host}"])
+            else:
+                command = "open" if sys.platform == "darwin" else "xdg-open"
+                subprocess.Popen([command, f"smb://{host}"])
+        except OSError as error:
+            show_info_dialog(
+                self,
+                "Não foi possível abrir",
+                f"O explorador de arquivos não conseguiu abrir as pastas de {host}.\n{error}",
+            )
 
     # ---- util
     def say(self, msg):
@@ -1479,7 +1538,7 @@ class App(ctk.CTk):
             done, total = latest_progress
             progress = done / total if total else 1
             self.bar.set(progress)
-            self.bar_lbl.configure(text=f"{progress:.0%} ({done}/{total} arquivos)")
+            self.bar_lbl.configure(text=f"⏳ {progress:.0%} ({done}/{total} arquivos)")
         if self.ssh_screen_dirty:
             self._render_ssh_screen()
         delay = 1 if processed == max_items else (20 if self.ssh_channel else 100)
