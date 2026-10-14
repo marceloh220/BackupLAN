@@ -10,7 +10,7 @@ Este projeto reúne o script de configuração de um NAS Debian, um agente que p
 | Agente de estatísticas | `marcelinoServer.py` | Publica métricas do servidor e regras de compartilhamento Samba em JSON. |
 | Serviço systemd | `marcelinoServer.service` | Executa o agente após a inicialização do sistema. |
 | Instalador do agente | `install_marcelinoServer.sh` | Instala o agente, configura o arquivo de ambiente e inicia o serviço. |
-| Cliente Windows | `marcelinoClient.py` | Interface para estatísticas, compartilhamentos, backup e terminal SSH. |
+| Cliente Windows | `marcelinoClient.py` | Interface para estatísticas, compartilhamentos, backup/restauração e terminal SSH. |
 | Instalador do cliente | `install_marcelinoClient.ps1` | Instala dependências, gera o executável e cria atalhos. |
 
 ## Configurar o NAS

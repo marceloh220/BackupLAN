@@ -25,6 +25,8 @@ from types import SimpleNamespace
 from pathlib import Path
 
 import smbclient
+import smbclient.path
+import ntpath
 from PIL import Image, ImageDraw
 
 SMB_PORT = 445
@@ -47,6 +49,14 @@ THEME_PALETTE = {
 
 
 def show_info_dialog(parent, title, message):
+    '''
+    Exibe um diálogo de informação com um botão "OK".
+
+    Parâmetros:
+    parent (tk.Widget): O widget pai para o diálogo.
+    title (str): O título do diálogo.
+    message (str): A mensagem a ser exibida no diálogo.
+    '''
     dialog = ctk.CTkToplevel(parent)
     dialog.title(title)
     dialog.geometry("420x160")
@@ -64,6 +74,17 @@ def show_info_dialog(parent, title, message):
 
 
 def ask_text_dialog(parent, title, message):
+    '''
+    Exibe um diálogo solicitando ao usuário que insira um texto.
+
+    Parâmetros:
+    parent (tk.Widget): O widget pai para o diálogo.
+    title (str): O título do diálogo.
+    message (str): A mensagem a ser exibida no diálogo.
+
+    Retorna:
+    str | None: O texto inserido pelo usuário, ou None se o diálogo for cancelado.
+    '''
     dialog = ctk.CTkToplevel(parent)
     dialog.title(title)
     dialog.geometry("480x230")
@@ -96,11 +117,12 @@ def ask_text_dialog(parent, title, message):
 
 
 def hide_monitor_share(shares):
+    """Remove o compartilhamento de monitor da lista de compartilhamentos."""
     return [share for share in shares if share.casefold() != MONITOR_SHARE.casefold()]
 
 
 def acquire_single_instance():
-    """Retorna um handle a manter vivo, ou None se já houver outra instância."""
+    """Retorna um handle para o mutex de instância única, ou None se já houver outra instância."""
     if os.name == "nt":
         import ctypes
 
@@ -110,6 +132,7 @@ def acquire_single_instance():
         if ctypes.get_last_error() == 183:  # ERROR_ALREADY_EXISTS
             return None
         return handle
+    """Se não for Windows, utiliza um arquivo de lock para garantir instância única."""
     import fcntl
 
     lock_file = open(Path(tempfile.gettempdir()) / f"marcelinoClient.{os.getuid()}.lock", "w")
@@ -122,6 +145,7 @@ def acquire_single_instance():
 
 
 def local_ip():
+    """Retorna o endereço IP local da máquina."""
     s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     try:
         s.connect(("10.255.255.255", 1))
@@ -133,7 +157,9 @@ def local_ip():
 
 
 def scan_network(callback):
-    """Varre a sub-rede /24 procurando hosts com a porta SMB aberta."""
+    """Varre a sub-rede /24 procurando hosts com a porta SMB aberta.
+    O callback é chamado com o endereço IP e o nome do host para cada host encontrado.
+    """
     base = local_ip().rsplit(".", 1)[0]
 
     def probe(i):
@@ -154,6 +180,7 @@ def scan_network(callback):
 
 
 class Remote:
+    """Representa um host remoto acessível via SMB."""
     def __init__(self, ip, name, user, password, domain=""):
         self.host = ip
         self.name = name
@@ -162,6 +189,7 @@ class Remote:
         )
 
     def list_shares(self, user, password, domain=""):
+        """Lista os compartilhamentos SMB disponíveis no host remoto."""
         if os.name == "nt":
             return self._list_shares_windows(user, password, domain)
         if os.name == "posix":
@@ -169,6 +197,7 @@ class Remote:
         raise OSError(f"Enumeração SMB não suportada nesta plataforma: {os.name}")
 
     def _list_shares_linux(self, user, password, domain=""):
+        """Lista os compartilhamentos SMB disponíveis no host remoto usando smbclient no Linux."""
         import tempfile
 
         smbclient_path = shutil.which("smbclient")
@@ -209,6 +238,7 @@ class Remote:
                 os.unlink(auth_path)
 
     def _list_shares_windows(self, user, password, domain=""):
+        """Lista os compartilhamentos SMB disponíveis no host remoto usando smbclient no Windows."""
         import ctypes
         from ctypes import wintypes
 
@@ -295,7 +325,11 @@ class Remote:
             cancel_connection(resource.lpRemoteName, 0, False)
 
     def unc(self, share, path=""):
-        return f"\\\\{self.host}\\{share}" + (path or "").replace("/", "\\")
+        share_str = str(share or "").strip("/\\")
+        path_str = str(path or "").replace("/", "\\").strip("\\")
+        if path_str:
+            return f"\\\\{self.host}\\{share_str}\\{path_str}"
+        return f"\\\\{self.host}\\{share_str}"
 
     def list(self, share, path):
         return [
@@ -304,8 +338,7 @@ class Remote:
         ]
 
     def read_status(self, share, path):
-        path = path.lstrip("/\\")
-        with smbclient.open_file(self.unc(share, f"/{path}"), mode="r", encoding="utf-8") as status_file:
+        with smbclient.open_file(self.unc(share, path), mode="r", encoding="utf-8") as status_file:
             return json.load(status_file)
 
     def ensure_dir(self, share, path):
@@ -325,6 +358,39 @@ class Remote:
             return False
         st = os.stat(local_path)
         return a.st_size == st.st_size and a.st_mtime >= st.st_mtime - 2
+
+    def download(self, share, remote_path, local_path):
+        remote_unc = self.unc(share, remote_path)
+        os.makedirs(os.path.dirname(os.path.abspath(local_path)), exist_ok=True)
+        with smbclient.open_file(remote_unc, mode="rb") as in_file, open(local_path, "wb") as out_file:
+            shutil.copyfileobj(in_file, out_file, 1024 * 1024)
+        st = smbclient.stat(remote_unc)
+        os.utime(local_path, times=(st.st_atime, st.st_mtime))
+
+    def restore_up_to_date(self, share, remote_path, local_path):
+        if not os.path.exists(local_path):
+            return False
+        try:
+            r_stat = smbclient.stat(self.unc(share, remote_path))
+        except Exception:
+            return False
+        local_stat = os.stat(local_path)
+        return local_stat.st_size == r_stat.st_size and local_stat.st_mtime >= r_stat.st_mtime - 2
+
+    def is_dir(self, share, remote_path=""):
+        try:
+            return smbclient.path.isdir(self.unc(share, remote_path))
+        except Exception:
+            return False
+
+    def is_file(self, share, remote_path=""):
+        try:
+            return smbclient.path.isfile(self.unc(share, remote_path))
+        except Exception:
+            return False
+
+    def walk(self, share, remote_path="", onerror=None):
+        return smbclient.walk(self.unc(share, remote_path), onerror=onerror)
 
 
 class VariableLabel(ctk.CTkLabel):
@@ -459,6 +525,9 @@ class App(ctk.CTk):
         self.path = ""
         self.dest = None  # (share, path)
         self.dest_server = None
+        self.selected_remote_entry = None
+        self.last_restore_folder = ""
+        self.transfer_in_progress = False
         self.cancel = threading.Event()
         self.hosts = {}
         self.saved_server = None
@@ -555,6 +624,8 @@ class App(ctk.CTk):
         self.authenticated_password = None
         self.remote = None
         self.share, self.path = None, ""
+        self.selected_remote_entry = None
+        self.transfer_in_progress = False
         self.cancel.set()
         self.pwd.set("")
         self.auth_summary.set("Não autenticado")
@@ -674,6 +745,10 @@ class App(ctk.CTk):
                 self.dest_server = server
                 self._update_dest_label()
 
+        last_restore = self.saved_settings.get("last_restore_folder")
+        if isinstance(last_restore, str):
+            self.last_restore_folder = last_restore
+
         self._apply_theme(self.saved_settings.get("theme", "light"))
     def _save_settings(self):
         destination = None
@@ -688,6 +763,7 @@ class App(ctk.CTk):
             "server": self.saved_server,
             "sources": list(self.source_paths),
             "destination": destination,
+            "last_restore_folder": getattr(self, "last_restore_folder", ""),
             "theme": self.theme,
             "ssh_key_path": self.ssh_key_path.get().strip(),
             "status_interval_seconds": self._status_interval_seconds(),
@@ -712,13 +788,13 @@ class App(ctk.CTk):
 
     def _update_dest_label(self):
         if not self.dest:
-            self.dest_lbl.configure(text="⇥ Destino: (nenhum)")
+            self.dest_lbl.configure(text="⇥ Destino do backup: (nenhum)")
             return
         share, path = self.dest
         location = f"\\\\{self.dest_server}\\{share}" if self.dest_server else f"\\\\{share}"
         if path:
             location += "\\" + path.replace("/", "\\")
-        self.dest_lbl.configure(text=f"⇥ Destino: {location}")
+        self.dest_lbl.configure(text=f"⇥ Destino do backup: {location}")
 
     def _build(self):
         self.login_page = ctk.CTkFrame(self, fg_color="transparent")
@@ -855,20 +931,30 @@ class App(ctk.CTk):
         mid = ctk.CTkFrame(page, fg_color="transparent")
         mid.pack(fill="both", expand=True, padx=8)
 
-        remote_panel = self._section(mid, "▣ Arquivos compartilhados (destino)")
+        remote_panel = self._section(mid, "▣ Arquivos no servidor remoto")
         remote_panel.pack(side="left", fill="both", expand=True, padx=(0, 4), pady=4)
         self.path_lbl = ctk.CTkLabel(remote_panel, text="-", anchor="w")
         self.path_lbl.pack(fill="x", padx=10, pady=(2, 4))
         self.rlist = ctk.CTkScrollableFrame(remote_panel, fg_color="transparent")
         self.remote_buttons = []
         self.rlist.pack(fill="both", expand=True, padx=6, pady=4)
+
+        self.sel_lbl = ctk.CTkLabel(remote_panel, text="Selecionado: (nenhum)", anchor="w")
+        self.sel_lbl.pack(fill="x", padx=10, pady=(2, 2))
+
+        remote_actions = ctk.CTkFrame(remote_panel, fg_color="transparent")
+        remote_actions.pack(fill="x", padx=6, pady=4)
         self._accent_button(
-            remote_panel, text="Usar esta pasta como destino", command=self.set_dest,
-        ).pack(pady=4)
-        self.dest_lbl = ctk.CTkLabel(remote_panel, text="⇥ Destino: (nenhum)", anchor="w")
+            remote_actions, text="Usar como destino", command=self.set_dest,
+        ).pack(side="left", fill="x", expand=True, padx=(0, 2))
+        self._accent_button(
+            remote_actions, text="⤓ Restaurar para o PC", command=self.restore_current_or_selected,
+        ).pack(side="left", fill="x", expand=True, padx=(2, 0))
+
+        self.dest_lbl = ctk.CTkLabel(remote_panel, text="⇥ Destino do backup: (nenhum)", anchor="w")
         self.dest_lbl.pack(fill="x", padx=10, pady=(2, 8))
 
-        source_panel = self._section(mid, "📁 Pastas locais (origem)")
+        source_panel = self._section(mid, "📁 Pastas locais (origem do backup)")
         source_panel.pack(side="left", fill="both", expand=True, padx=(4, 0), pady=4)
         self.source_paths = []
         self.source_row_widgets = []
@@ -879,6 +965,7 @@ class App(ctk.CTk):
         act = ctk.CTkFrame(page, fg_color="transparent")
         act.pack(fill="x", padx=8, pady=4)
         self._accent_button(act, text="▶ Iniciar backup", command=self.start_backup).pack(side="left")
+        self._accent_button(act, text="⤓ Restaurar arquivos...", command=self.open_restore_dialog).pack(side="left", padx=4)
         self._accent_button(act, text="■ Cancelar", command=self.cancel.set).pack(side="left", padx=4)
         self.bar = ctk.CTkProgressBar(
             act,
@@ -895,14 +982,13 @@ class App(ctk.CTk):
     def _build_terminal_page(self, page):
         controls = ctk.CTkFrame(page, fg_color="transparent")
         controls.pack(fill="x", padx=8, pady=8)
-        self._accent_button(
-            controls, text="Conectar SSH", command=self._connect_ssh,
-        ).pack(side="left", padx=(0, 4))
-        self._accent_button(
-            controls, text="Desconectar", command=self._disconnect_ssh,
-        ).pack(side="left", padx=4)
+        self.ssh_toggle_button = self._accent_button(
+            controls, text="Conectar SSH", command=self._toggle_ssh,
+        )
+        self.ssh_toggle_button.pack(side="left", padx=(0, 4))
         self.ssh_status = tk.StringVar(value="Faça login para conectar ao servidor via SSH.")
         VariableLabel(controls, self.ssh_status).pack(side="left", padx=12)
+        self._update_ssh_toggle_button()
 
         key_controls = ctk.CTkFrame(page, fg_color="transparent")
         key_controls.pack(fill="x", padx=8, pady=(0, 8))
@@ -966,6 +1052,23 @@ class App(ctk.CTk):
         terminal_widget.insert("end", text)
         terminal_widget.see("end")
 
+    def _toggle_ssh(self):
+        if self.ssh_client:
+            self._disconnect_ssh()
+        elif not self.ssh_connecting:
+            self._connect_ssh()
+
+    def _update_ssh_toggle_button(self):
+        button = getattr(self, "ssh_toggle_button", None)
+        if button is None:
+            return
+        if self.ssh_connecting:
+            button.configure(text="Conectando...", state="disabled")
+        elif self.ssh_client:
+            button.configure(text="Desconectar", state="normal")
+        else:
+            button.configure(text="Conectar SSH", state="normal")
+
     def _connect_ssh(self):
         if not self.authenticated or not self.remote or not self.authenticated_password:
             self.ssh_status.set("Faça login na aba Login antes de conectar via SSH.")
@@ -982,6 +1085,7 @@ class App(ctk.CTk):
         key_passphrase = self.ssh_key_passphrase_entry.get() or None
         self.ssh_key_passphrase_entry.delete(0, "end")
         self.ssh_connecting = True
+        self._update_ssh_toggle_button()
         self.ssh_status.set(f"Conectando a {username}@{host}:22...")
         client = paramiko.SSHClient()
         self.ssh_connecting_client = client
@@ -1016,10 +1120,12 @@ class App(ctk.CTk):
         self.ssh_connecting_client = None
         self.ssh_connecting = False
         if error:
+            self._update_ssh_toggle_button()
             self.ssh_status.set(f"Falha na conexão SSH: {error}")
             self._terminal_append(f"Falha na conexão SSH: {error}\n")
             return
         self.ssh_client = client
+        self._update_ssh_toggle_button()
         self.ssh_channel = channel
         self.ssh_screen = pyte.Screen(120, 24)
         self.ssh_stream = pyte.Stream(self.ssh_screen)
@@ -1197,6 +1303,7 @@ class App(ctk.CTk):
         if client:
             client.close()
         self._clear_terminal()
+        self._update_ssh_toggle_button()
         self.ssh_status.set("Conexão SSH encerrada.")
 
     def _disconnect_ssh(self):
@@ -1225,6 +1332,7 @@ class App(ctk.CTk):
         client, self.ssh_client = self.ssh_client, None
         if client:
             client.close()
+        self._update_ssh_toggle_button()
         if update_status and hasattr(self, "ssh_status"):
             self.ssh_status.set("Desconectado do SSH.")
 
@@ -1512,6 +1620,8 @@ class App(ctk.CTk):
         max_items = 100
         processed = 0
         latest_progress = None
+        latest_progress_phase = None
+        latest_progress_value = None
         while processed < max_items:
             try:
                 kind, val = self.q.get_nowait()
@@ -1529,16 +1639,34 @@ class App(ctk.CTk):
                 self.host_cb.configure(values=sorted(self.hosts))
             elif kind == "progress":
                 latest_progress = val
+                latest_progress_phase = None
+                latest_progress_value = None
+            elif kind == "progress_phase":
+                latest_progress_phase = val
+                latest_progress = None
+                latest_progress_value = None
+            elif kind == "progress_value":
+                latest_progress_value = val
+                latest_progress = None
+                latest_progress_phase = None
             elif kind == "ssh_data":
                 generation, data = val
                 self._feed_ssh_output(generation, data)
             elif kind == "call":
                 val()
-        if latest_progress is not None:
-            done, total = latest_progress
+        if latest_progress_value is not None:
+            progress, label = latest_progress_value
+            self.bar.set(progress)
+            self.bar_lbl.configure(text=label)
+        elif latest_progress_phase is not None:
+            self.bar.set(0)
+            self.bar_lbl.configure(text=f"⏳ {latest_progress_phase}")
+        elif latest_progress is not None:
+            done, total, *unit = latest_progress
             progress = done / total if total else 1
             self.bar.set(progress)
-            self.bar_lbl.configure(text=f"⏳ {progress:.0%} ({done}/{total} arquivos)")
+            label = unit[0] if unit else "arquivos"
+            self.bar_lbl.configure(text=f"⏳ {progress:.0%} ({done}/{total} {label})")
         if self.ssh_screen_dirty:
             self._render_ssh_screen()
         delay = 1 if processed == max_items else (20 if self.ssh_channel else 100)
@@ -2121,31 +2249,72 @@ class App(ctk.CTk):
         remote = self.remote
         share = self.share
         path = self.path
-        if not self.authenticated or remote is None or not share:
+        if not self.authenticated or remote is None:
+            return
+        if not share:
+            self.show_shares_list()
             return
         location = f"\\\\{remote.host}\\{share}"
         if path:
             location += "\\" + path.replace("/", "\\")
         self.path_lbl.configure(text=location)
+        self.selected_remote_entry = None
+        self._update_selection_label()
 
         def run():
             try:
                 entries = [("dir" if i.isDirectory else "file", i.filename)
                            for i in remote.list(share, path)]
                 entries.sort(key=lambda e: (e[0] != "dir", e[1].lower()))
-                entries.insert(0, ("up", ".."))
+                entries.insert(0, ("up", "Voltar"))
                 self.ui(lambda: self._fill(entries))
             except Exception as e:
                 self.say(f"Erro ao listar: {e}")
 
         threading.Thread(target=run, daemon=True).start()
 
+    def show_shares_list(self):
+        remote = self.remote
+        if not self.authenticated or remote is None:
+            return
+        self.share = None
+        self.path = ""
+        self.selected_remote_entry = None
+        self.path_lbl.configure(text=f"\\\\{remote.host}\\")
+        self._update_selection_label()
+
+        def run():
+            try:
+                shares = remote.list_shares(
+                    self.authenticated_user, self.authenticated_password,
+                )
+                shares = hide_monitor_share(shares)
+                self.ui(lambda: self._fill([("share", s) for s in shares]))
+            except Exception as e:
+                self.say(f"Erro ao listar compartilhamentos: {e}")
+
+        threading.Thread(target=run, daemon=True).start()
+
+    def _update_selection_label(self):
+        if not hasattr(self, "sel_lbl"):
+            return
+        if self.selected_remote_entry:
+            kind, name, _, _ = self.selected_remote_entry
+            tag = "[arquivo]" if kind == "file" else "[pasta]"
+            self.sel_lbl.configure(text=f"Selecionado: {tag} {name}")
+        elif self.share:
+            self.sel_lbl.configure(text="Selecionado: (pasta atual inteira)")
+        else:
+            self.sel_lbl.configure(text="Selecionado: (nenhum)")
+
     def _fill(self, entries):
         self.entries = entries
+        self.selected_remote_entry = None
+        self._update_selection_label()
         for button in self.remote_buttons:
             button.destroy()
         self.remote_buttons.clear()
-        icons = {"share": "[share] ", "dir": "[pasta] ", "file": "        ", "up": ""}
+        icons = {"share": "[share] ", "dir": "[pasta] ", "file": "        ", "up": "↩ "}
         for index, (kind, name) in enumerate(entries):
             button = ctk.CTkButton(
                 self.rlist,
@@ -2154,25 +2323,101 @@ class App(ctk.CTk):
                 fg_color="transparent",
                 hover_color=self.theme_colors["hover"],
                 text_color=self.theme_colors["text"],
-                command=lambda item_index=index: self.open_item(item_index),
+                command=lambda item_index=index: self.on_remote_item_click(item_index),
             )
+            button.bind("<Button-3>", lambda e, item_index=index: self._on_remote_context_menu(e, item_index))
             button.pack(fill="x", padx=2, pady=1)
             self.remote_buttons.append(button)
 
+    def on_remote_item_click(self, index):
+        if not self.authenticated or not isinstance(index, int) or not 0 <= index < len(self.entries):
+            return
+        kind, name = self.entries[index]
+        if kind in ("share", "dir", "up"):
+            self.open_item(index)
+        elif kind == "file":
+            self.select_remote_item(index)
+
+    def select_remote_item(self, index):
+        if not (0 <= index < len(self.entries)):
+            return
+        kind, name = self.entries[index]
+        self.selected_remote_entry = (kind, name, self.share, self.path)
+        self._update_selection_label()
+        for idx, btn in enumerate(self.remote_buttons):
+            if idx == index:
+                btn.configure(fg_color=self.theme_colors["hover"])
+            else:
+                btn.configure(fg_color="transparent")
+
+    def _on_remote_context_menu(self, event, index):
+        if not self.authenticated or not isinstance(index, int) or not 0 <= index < len(self.entries):
+            return
+        kind, name = self.entries[index]
+        if kind == "up":
+            return
+        menu = tk.Menu(self, tearoff=0)
+        if kind == "file":
+            self.select_remote_item(index)
+            menu.add_command(
+                label=f"Restaurar '{name}' para o PC...",
+                command=lambda: self.open_restore_dialog(target_entry=(kind, name, self.share, self.path)),
+            )
+        elif kind in ("dir", "share"):
+            target_share = name if kind == "share" else self.share
+            target_path = "" if kind == "share" else (f"{self.path}/{name}".strip("/") if self.path else name)
+            menu.add_command(
+                label=f"Abrir '{name}'",
+                command=lambda: self.open_item(index),
+            )
+            menu.add_command(
+                label=f"Restaurar pasta '{name}' para o PC...",
+                command=lambda: self.open_restore_dialog(target_entry=(kind, name, target_share, target_path)),
+            )
+            menu.add_command(
+                label=f"Usar '{name}' como destino de backup",
+                command=lambda: self._set_dest_explicit(target_share, target_path),
+            )
+        try:
+            menu.tk_popup(event.x_root, event.y_root)
+        finally:
+            menu.grab_release()
+
+    def _set_dest_explicit(self, share, path):
+        if not self.authenticated or self.remote is None or not share:
+            return
+        self.dest = (share, path)
+        self.dest_server = self.remote.host
+        self._update_dest_label()
+        self._save_settings()
+        self.say(f"Destino de backup definido para \\\\{self.remote.host}\\{share}\\{path}")
+
     def open_item(self, index):
-        if not self.authenticated:
+        remote = self.remote
+        if not self.authenticated or remote is None:
             return
         if not isinstance(index, int) or not 0 <= index < len(self.entries):
             return
         kind, name = self.entries[index]
         if kind == "share":
             self.share, self.path = name, ""
+            self.say(f"Abrindo compartilhamento: \\\\{remote.host}\\{self.share}")
         elif kind == "dir":
-            self.path = f"{self.path}/{name}"
+            self.path = f"{self.path}/{name}".strip("/") if self.path else name
+            clean_path = self.path.replace('/', '\\')
+            self.say(f"Acessando pasta: \\\\{remote.host}\\{self.share}\\{clean_path}")
         elif kind == "up":
-            self.path = self.path.rsplit("/", 1)[0] if self.path else ""
+            if self.path:
+                self.path = self.path.rsplit("/", 1)[0] if "/" in self.path else ""
+                clean_path = ("\\" + self.path.replace('/', '\\')) if self.path else ""
+                self.say(f"Retornando para: \\\\{remote.host}\\{self.share}{clean_path}")
+            else:
+                self.say("Retornando para lista de compartilhamentos.")
+                self.show_shares_list()
+                return
         else:
             return
+        self.selected_remote_entry = None
         self.refresh()
 
     def set_dest(self):
@@ -2184,6 +2429,370 @@ class App(ctk.CTk):
         self.dest_server = remote.host
         self._update_dest_label()
         self._save_settings()
+
+    def restore_current_or_selected(self):
+        if self.selected_remote_entry:
+            self.open_restore_dialog(target_entry=self.selected_remote_entry)
+        else:
+            self.open_restore_dialog()
+
+    def open_restore_dialog(self, target_entry=None):
+        if not self.authenticated or self.remote is None:
+            show_info_dialog(self, "Restauração", "Faça login no servidor antes de restaurar arquivos.")
+            return
+
+        target = target_entry or self.selected_remote_entry
+        options = []
+        option_specs = {}
+
+        if target:
+            kind, name, t_share, t_path = target
+            is_d = (kind != "file")
+            if kind == "share":
+                t_share = name
+                clean_path = ""
+                is_d = True
+            elif kind == "file":
+                clean_path = f"{t_path}/{name}".strip("/") if t_path else name
+            else:
+                clean_path = f"{t_path}/{name}".strip("/") if t_path else name
+            tag = "Arquivo" if kind == "file" else "Pasta"
+            path_repr = f"\\\\{self.remote.host}\\{t_share}\\{clean_path.replace('/', chr(92))}".rstrip("\\")
+            label = f"{tag}: {name} ({path_repr})"
+            options.append(label)
+            option_specs[label] = {
+                "share": t_share,
+                "path": clean_path,
+                "is_dir": is_d,
+                "name": name,
+            }
+
+        if self.share:
+            curr_name = self.path.rsplit("/", 1)[-1] if self.path else self.share
+            curr_unc = f"\\\\{self.remote.host}\\{self.share}"
+            if self.path:
+                curr_unc += f"\\{self.path.replace('/', chr(92))}"
+            curr_label = f"Pasta atual: {curr_unc}"
+            if curr_label not in option_specs:
+                options.append(curr_label)
+                option_specs[curr_label] = {
+                    "share": self.share,
+                    "path": self.path,
+                    "is_dir": True,
+                    "name": curr_name,
+                }
+
+        if self.dest:
+            d_share, d_path = self.dest
+            d_name = d_path.rsplit("/", 1)[-1] if d_path else d_share
+            d_unc = f"\\\\{self.remote.host}\\{d_share}"
+            if d_path:
+                d_unc += f"\\{d_path.replace('/', chr(92))}"
+            d_label = f"Destino de backup: {d_unc}"
+            if d_label not in option_specs:
+                options.append(d_label)
+                option_specs[d_label] = {
+                    "share": d_share,
+                    "path": d_path,
+                    "is_dir": True,
+                    "name": d_name,
+                }
+
+        if not options:
+            show_info_dialog(
+                self,
+                "Restauração",
+                "Nenhum arquivo ou pasta remota selecionada.\nAbra um compartilhamento na lista de arquivos ou configure uma pasta de destino de backup.",
+            )
+            return
+
+        dialog = ctk.CTkToplevel(self)
+        dialog.title("Restaurar arquivos para a máquina local")
+        dialog.geometry("640x440")
+        dialog.resizable(False, False)
+        dialog.transient(self)
+
+        ctk.CTkLabel(
+            dialog,
+            text="Restaurar do Servidor para o Computador Local",
+            font=ctk.CTkFont(size=15, weight="bold"),
+        ).pack(anchor="w", padx=20, pady=(16, 4))
+
+        ctk.CTkLabel(
+            dialog,
+            text="Escolha a origem no servidor e selecione a pasta local onde deseja restaurar os arquivos:",
+            wraplength=600,
+            justify="left",
+        ).pack(anchor="w", padx=20, pady=(0, 12))
+
+        src_frame = ctk.CTkFrame(dialog, fg_color="transparent")
+        src_frame.pack(fill="x", padx=20, pady=(0, 10))
+        ctk.CTkLabel(src_frame, text="Origem remota:", font=ctk.CTkFont(weight="bold")).pack(anchor="w", pady=(0, 4))
+
+        selected_source_var = tk.StringVar(value=options[0])
+        src_menu = ctk.CTkOptionMenu(
+            src_frame,
+            variable=selected_source_var,
+            values=options,
+            width=600,
+            fg_color=self.theme_colors["accent"],
+            button_color=self.theme_colors["accent_hover"],
+            command=lambda _val: update_preview(),
+        )
+        src_menu.pack(fill="x")
+
+        dst_frame = ctk.CTkFrame(dialog, fg_color="transparent")
+        dst_frame.pack(fill="x", padx=20, pady=(0, 6))
+        ctk.CTkLabel(dst_frame, text="Salvar na pasta local:", font=ctk.CTkFont(weight="bold")).pack(anchor="w", pady=(0, 4))
+
+        dst_input_row = ctk.CTkFrame(dst_frame, fg_color="transparent")
+        dst_input_row.pack(fill="x")
+
+        default_dest = self.last_restore_folder
+        if not default_dest or not os.path.exists(default_dest):
+            downloads = str(Path.home() / "Downloads")
+            default_dest = downloads if os.path.exists(downloads) else str(Path.home())
+
+        local_path_var = tk.StringVar(value=default_dest)
+        dest_entry = ctk.CTkEntry(dst_input_row, textvariable=local_path_var, width=480)
+        dest_entry.pack(side="left", fill="x", expand=True, padx=(0, 8))
+
+        def browse_dest():
+            selected = filedialog.askdirectory(
+                initialdir=local_path_var.get() or str(Path.home()),
+                title="Selecione a pasta local de destino",
+            )
+            if selected:
+                local_path_var.set(os.path.normpath(selected))
+                update_preview()
+
+        self._accent_button(dst_input_row, text="Procurar...", width=100, command=browse_dest).pack(side="right")
+
+        preview_lbl = ctk.CTkLabel(dialog, text="", anchor="w", font=ctk.CTkFont(size=11), text_color=self.theme_colors["muted"])
+        preview_lbl.pack(fill="x", padx=20, pady=(2, 6))
+
+        def update_preview():
+            spec = option_specs.get(selected_source_var.get())
+            base_dir = local_path_var.get().strip() or "C:\\..."
+            if not spec:
+                preview_lbl.configure(text="")
+                return
+            if spec["is_dir"]:
+                f_name = spec["name"]
+                final_path = os.path.join(base_dir, f_name)
+                preview_lbl.configure(text=f"📁 Uma pasta '{f_name}' será criada em: {final_path}")
+            else:
+                f_name = spec["name"]
+                final_path = os.path.join(base_dir, f_name)
+                preview_lbl.configure(text=f"📄 O arquivo será salvo como: {final_path}")
+
+        local_path_var.trace_add("write", lambda *_: update_preview())
+        update_preview()
+
+        only_diff_var = tk.BooleanVar(value=True)
+        ctk.CTkCheckBox(
+            dialog,
+            text="Pular arquivos locais que já estão idênticos e atualizados (restauração incremental)",
+            variable=only_diff_var,
+        ).pack(anchor="w", padx=20, pady=6)
+
+        btn_frame = ctk.CTkFrame(dialog, fg_color="transparent")
+        btn_frame.pack(fill="x", padx=20, pady=(16, 16))
+
+        def submit():
+            chosen_key = selected_source_var.get()
+            spec = option_specs.get(chosen_key)
+            dest_dir = local_path_var.get().strip()
+            if not spec:
+                show_info_dialog(dialog, "Erro", "Selecione uma origem válida.")
+                return
+            if not dest_dir:
+                show_info_dialog(dialog, "Erro", "Informe ou selecione a pasta local de destino.")
+                return
+            try:
+                os.makedirs(dest_dir, exist_ok=True)
+            except OSError as err:
+                show_info_dialog(dialog, "Erro", f"Não foi possível criar a pasta local:\n{err}")
+                return
+
+            self.last_restore_folder = dest_dir
+            self._save_settings()
+            dialog.destroy()
+            self.start_restore(spec, dest_dir, only_modified=only_diff_var.get())
+
+        ctk.CTkButton(btn_frame, text="Cancelar", width=100, command=dialog.destroy).pack(side="right", padx=(8, 0))
+        self._accent_button(btn_frame, text="⤓ Iniciar restauração", width=170, command=submit).pack(side="right")
+
+        dialog.bind("<Escape>", lambda _e: dialog.destroy())
+        dialog.wait_visibility()
+        dialog.grab_set()
+
+    def start_restore(self, remote_spec, local_dir, only_modified=True):
+        if getattr(self, "transfer_in_progress", False):
+            show_info_dialog(
+                self, "Operação em andamento",
+                "Já existe uma transferência em andamento. Aguarde ou cancele antes de iniciar outra.",
+            )
+            return
+        if not (self.authenticated and self.remote):
+            show_info_dialog(self, "Restauração", "Faça login no servidor primeiro.")
+            return
+        self.cancel.clear()
+        threading.Thread(
+            target=self.restore,
+            args=(remote_spec, local_dir, only_modified),
+            daemon=True,
+        ).start()
+
+    def _download_smb_file(self, src_unc, dst_local):
+        os.makedirs(os.path.dirname(os.path.abspath(dst_local)), exist_ok=True)
+        with smbclient.open_file(src_unc, mode="rb") as in_file, open(dst_local, "wb") as out_file:
+            shutil.copyfileobj(in_file, out_file, 1024 * 1024)
+        st = smbclient.stat(src_unc)
+        os.utime(dst_local, times=(st.st_atime, st.st_mtime))
+
+    def _restore_file_up_to_date(self, src_unc, dst_local):
+        if not os.path.exists(dst_local):
+            return False
+        try:
+            r_stat = smbclient.stat(src_unc)
+            l_stat = os.stat(dst_local)
+            return l_stat.st_size == r_stat.st_size and l_stat.st_mtime >= r_stat.st_mtime - 2
+        except Exception:
+            return False
+
+    def restore(self, remote_spec, local_dir, only_modified=True):
+        self.transfer_in_progress = True
+        try:
+            remote = self.remote
+            if remote is None:
+                return
+            share = remote_spec["share"]
+            remote_path = remote_spec["path"].strip("/\\")
+            is_directory = remote_spec["is_dir"]
+            name = remote_spec["name"]
+
+            unc_target = remote.unc(share, remote_path) if remote_path else remote.unc(share)
+            self.say(f"--- Iniciando restauração de {unc_target} ---")
+            self.say(f"Destino local: {local_dir}")
+
+            items_to_restore = []
+            if not is_directory:
+                filename = ntpath.basename(remote_path.replace("/", "\\"))
+                dest_file = os.path.join(local_dir, filename)
+                items_to_restore.append((unc_target, dest_file, filename))
+            else:
+                self.say("Escaneando arquivos no servidor...")
+                folder_name = ntpath.basename(remote_path.replace("/", "\\")) if remote_path else share
+                dest_root = os.path.join(local_dir, folder_name)
+
+                def on_walk_err(err):
+                    self.say(f"Aviso ao acessar pasta remota: {err}")
+
+                try:
+                    last_scan_log = time.monotonic()
+                    for dirpath, _, filenames in smbclient.walk(unc_target, onerror=on_walk_err):
+                        if self.cancel.is_set():
+                            break
+                        rel = ntpath.relpath(dirpath, unc_target)
+                        for fname in filenames:
+                            file_unc = ntpath.join(dirpath, fname)
+                            rel_file = fname if rel == "." else ntpath.join(rel, fname)
+                            local_dest_path = os.path.join(dest_root, rel_file)
+                            display_rel = ntpath.join(folder_name, rel_file)
+                            items_to_restore.append((file_unc, local_dest_path, display_rel))
+                        now = time.monotonic()
+                        if now - last_scan_log >= 1.5:
+                            self.say(f"Mapeando arquivos... {len(items_to_restore)} encontrados até o momento.")
+                            last_scan_log = now
+                except Exception as err:
+                    self.say(f"Erro durante listagem remota: {err}")
+                    return
+
+            total = len(items_to_restore)
+            if total == 0:
+                if self.cancel.is_set():
+                    self.say("Restauração cancelada antes de iniciar.")
+                else:
+                    self.say("Nenhum arquivo encontrado para restaurar.")
+                return
+
+            self.say(f"Total: {total} arquivo(s) a processar. Iniciando transferências...")
+            restored = skipped = failed = 0
+            done = 0
+            max_workers = 4
+            pending = set()
+            cancelled = False
+            last_progress_update = time.monotonic()
+            last_log_time = time.monotonic()
+            self.q.put(("progress", (0, total)))
+
+            def report_progress(force=False):
+                nonlocal last_progress_update
+                now = time.monotonic()
+                if force or now - last_progress_update >= 0.1:
+                    self.q.put(("progress", (done, total)))
+                    last_progress_update = now
+
+            def transfer_one(file_unc, local_dest_path, display_rel):
+                if self.cancel.is_set():
+                    return "cancelled", display_rel, ""
+                try:
+                    if only_modified and self._restore_file_up_to_date(file_unc, local_dest_path):
+                        return "skipped", display_rel, ""
+                    self._download_smb_file(file_unc, local_dest_path)
+                    return "restored", display_rel, ""
+                except Exception as err:
+                    return "failed", display_rel, str(err)
+
+            def record_completed():
+                nonlocal restored, skipped, failed, done, last_log_time
+                if not pending:
+                    return
+                completed, _ = wait(pending, return_when=FIRST_COMPLETED)
+                for future in completed:
+                    pending.remove(future)
+                    result, display_rel, err = future.result()
+                    done += 1
+                    now = time.monotonic()
+                    if result == "restored":
+                        restored += 1
+                        self.say(f"[{done}/{total}] Restaurado: {display_rel}")
+                        last_log_time = now
+                    elif result == "skipped":
+                        skipped += 1
+                        if total <= 50 or done % 10 == 0 or done == total or (now - last_log_time >= 1.5):
+                            self.say(f"[{done}/{total}] Inalterado: {display_rel}")
+                            last_log_time = now
+                    elif result == "failed":
+                        failed += 1
+                        self.say(f"[{done}/{total}] FALHA ao restaurar {display_rel}: {err}")
+                        last_log_time = now
+                    else:
+                        continue
+                    report_progress()
+
+            with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                for file_unc, local_dest_path, display_rel in items_to_restore:
+                    if self.cancel.is_set():
+                        cancelled = True
+                        break
+                    pending.add(executor.submit(transfer_one, file_unc, local_dest_path, display_rel))
+                    if len(pending) >= max_workers * 2:
+                        record_completed()
+                    if cancelled:
+                        break
+
+                while pending:
+                    record_completed()
+
+            report_progress(force=True)
+            if cancelled or self.cancel.is_set():
+                self.say(f"Restauração cancelada: {restored} restaurados, {skipped} inalterados, {failed} falhas.")
+            else:
+                self.say(f"Restauração concluída com sucesso: {restored} restaurados, {skipped} inalterados, {failed} falhas.")
+        finally:
+            self.transfer_in_progress = False
 
     # ---- origem
     def _render_sources(self):
@@ -2219,6 +2828,12 @@ class App(ctk.CTk):
 
     # ---- backup
     def start_backup(self):
+        if getattr(self, "transfer_in_progress", False):
+            show_info_dialog(
+                self, "Operação em andamento",
+                "Já existe uma transferência em andamento. Aguarde ou cancele antes de iniciar outra.",
+            )
+            return
         sources = list(self.source_paths)
         if not (self.authenticated and self.remote and self.dest and sources):
             show_info_dialog(
@@ -2229,104 +2844,221 @@ class App(ctk.CTk):
         threading.Thread(target=self.backup, args=(sources,), daemon=True).start()
 
     def backup(self, sources):
-        remote = self.remote
-        destination = self.dest
-        if remote is None or destination is None:
-            return
-        share, base = destination
-        sent = skipped = failed = 0
-        total = sum(len(fs) for s in sources for _, _, fs in os.walk(s))
-        done = 0
-        max_workers = 4
-        pending = set()
-        cancelled = False
-        last_progress_update = time.monotonic()
-        self.q.put(("progress", (0, total)))
-
-        def report_progress(force=False):
-            nonlocal last_progress_update
-            now = time.monotonic()
-            if force or now - last_progress_update >= 0.1:
-                self.q.put(("progress", (done, total)))
-                last_progress_update = now
-
-        def transfer_file(local_path, remote_path):
-            if self.cancel.is_set():
-                return "cancelled", local_path, ""
-            try:
-                if remote.up_to_date(share, remote_path, local_path):
-                    return "skipped", local_path, ""
-                remote.upload(share, remote_path, local_path)
-                return "sent", local_path, ""
-            except Exception as error:
-                return "failed", local_path, str(error)
-
-        def record_completed(block):
-            nonlocal sent, skipped, failed, done
-            if not pending:
+        self.transfer_in_progress = True
+        try:
+            remote = self.remote
+            destination = self.dest
+            if remote is None or destination is None:
                 return
-            completed, _ = wait(
-                pending,
-                return_when=FIRST_COMPLETED if block else FIRST_COMPLETED,
-            )
-            for future in completed:
-                pending.remove(future)
-                result, local_path, error = future.result()
-                if result == "sent":
-                    sent += 1
-                elif result == "skipped":
-                    skipped += 1
-                elif result == "failed":
-                    failed += 1
-                    self.say(f"FALHA {local_path}: {error}")
-                else:
-                    continue
-                done += 1
-                report_progress()
+            share, base = destination
+            dest_unc = f"\\\\{remote.host}\\{share}" + (f"\\{base.replace('/', chr(92))}" if base else "")
+            self.say("--- Iniciando backup ---")
+            self.say(f"Destino no servidor: {dest_unc}")
+            self.say("Contando arquivos locais para iniciar a verificação...")
+            self.q.put(("progress_phase", "Contando arquivos locais..."))
+            sent = skipped = failed = 0
+            max_workers = 4
+            pending = set()
+            upload_files = []
+            cancelled = False
+            last_progress_update = time.monotonic()
+            last_log_time = time.monotonic()
+            total_files = 0
+            scan_log_time = time.monotonic()
 
-        with ThreadPoolExecutor(max_workers=max_workers) as executor:
             for src in sources:
+                for _, _, files in os.walk(src):
+                    total_files += len(files)
+                    now = time.monotonic()
+                    if now - scan_log_time >= 0.5:
+                        self.say(f"Contando arquivos locais... {total_files} encontrados.")
+                        scan_log_time = now
+
+            checked = 0
+
+            def report_check_progress(force=False):
+                nonlocal last_progress_update, last_log_time
+                now = time.monotonic()
+                if force or now - last_progress_update >= 0.1:
+                    fraction = checked / total_files if total_files else (1 if force else 0)
+                    progress = min(0.5, fraction * 0.5)
+                    self.q.put((
+                        "progress_value",
+                        (progress, f"⏳ Verificando: {progress:.0%} ({checked}/{total_files} arquivos)"),
+                    ))
+                    last_progress_update = now
+                if force or now - last_log_time >= 0.5:
+                    self.say(
+                        f"Verificando arquivos: {checked}/{total_files}; "
+                        f"{skipped} inalterados, {len(upload_files)} para enviar, {failed} falhas."
+                    )
+                    last_log_time = now
+
+            def check_file(local_path, remote_path):
                 if self.cancel.is_set():
-                    cancelled = True
-                    break
-                root_name = os.path.basename(os.path.normpath(src)) or "raiz"
-                for dirpath, _, files in os.walk(src):
+                    return "cancelled", local_path, ""
+                try:
+                    if remote.up_to_date(share, remote_path, local_path):
+                        return "skipped", local_path, ""
+                    return "upload", local_path, remote_path
+                except Exception as error:
+                    return "failed", local_path, str(error)
+
+            def record_checked():
+                nonlocal checked, skipped, failed, cancelled
+                if not pending:
+                    return
+                completed, _ = wait(pending, timeout=0.25, return_when=FIRST_COMPLETED)
+                if not completed:
+                    report_check_progress()
+                    return
+                for future in completed:
+                    pending.remove(future)
+                    result, local_path, error = future.result()
+                    if result == "upload":
+                        upload_files.append((local_path, error))
+                    elif result == "skipped":
+                        skipped += 1
+                    elif result == "cancelled":
+                        cancelled = True
+                    elif result == "failed":
+                        failed += 1
+                    else:
+                        cancelled = True
+                    if result != "cancelled":
+                        checked += 1
+                report_check_progress()
+
+            with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                for src in sources:
                     if self.cancel.is_set():
                         cancelled = True
                         break
-                    rel = os.path.relpath(dirpath, src).replace("\\", "/")
-                    rdir = f"{base}/{root_name}" + ("" if rel == "." else f"/{rel}")
-                    try:
-                        remote.ensure_dir(share, rdir)
-                    except Exception as error:
-                        self.say(f"Erro criando {rdir}: {error}")
-                        failed += len(files)
-                        done += len(files)
-                        report_progress()
-                        continue
-                    for filename in files:
+                    root_name = os.path.basename(os.path.normpath(src)) or "raiz"
+                    for dirpath, _, files in os.walk(src):
                         if self.cancel.is_set():
                             cancelled = True
                             break
-                        local_path = os.path.join(dirpath, filename)
-                        remote_path = f"{rdir}/{filename}"
-                        pending.add(executor.submit(transfer_file, local_path, remote_path))
-                        if len(pending) >= max_workers * 2:
-                            record_completed(block=True)
+                        rel = os.path.relpath(dirpath, src).replace("\\", "/")
+                        rdir = f"{base}/{root_name}" + ("" if rel == "." else f"/{rel}")
+                        try:
+                            remote.ensure_dir(share, rdir)
+                        except Exception as error:
+                            self.say(f"Erro criando {rdir}: {error}")
+                            failed += len(files)
+                            checked += len(files)
+                            report_check_progress()
+                            continue
+                        for filename in files:
+                            if self.cancel.is_set():
+                                cancelled = True
+                                break
+                            local_path = os.path.join(dirpath, filename)
+                            remote_path = f"{rdir}/{filename}"
+                            pending.add(executor.submit(check_file, local_path, remote_path))
+                            if len(pending) >= max_workers * 2:
+                                record_checked()
+                        if cancelled:
+                            break
                     if cancelled:
                         break
-                if cancelled:
-                    break
 
-            while pending:
-                record_completed(block=True)
+                while pending:
+                    record_checked()
 
-        report_progress(force=True)
-        if cancelled or self.cancel.is_set():
-            self.say(f"Backup cancelado: {sent} enviados, {skipped} inalterados, {failed} falhas.")
-        else:
-            self.say(f"Concluído: {sent} enviados, {skipped} inalterados, {failed} falhas.")
-        self.ui(self.refresh)
+            if not cancelled and not self.cancel.is_set():
+                checked = total_files
+            report_check_progress(force=True)
+            total = len(upload_files)
+            done = 0
+            last_upload_detail = ""
+            self.say(
+                f"Verificação concluída: {skipped} inalterados, "
+                f"{total} arquivo(s) para enviar."
+            )
+            if total and not cancelled and not self.cancel.is_set():
+                upload_started = True
+                self.q.put((
+                    "progress_value",
+                    (0.5, f"⏳ Enviando: 50% (0/{total} uploads)"),
+                ))
+            else:
+                upload_started = False
+
+            def report_progress(force=False):
+                nonlocal last_progress_update, last_log_time
+                now = time.monotonic()
+                if force or now - last_progress_update >= 0.1:
+                    fraction = done / total if total else 0
+                    progress = 0.5 + 0.5 * min(fraction, 0.98)
+                    self.q.put((
+                        "progress_value",
+                        (progress, f"⏳ Enviando: {progress:.0%} ({done}/{total} uploads)"),
+                    ))
+                    last_progress_update = now
+                if force or now - last_log_time >= 0.5:
+                    self.say(
+                        f"Enviando arquivos: {done}/{total}; "
+                        f"{sent} enviados, {failed} falhas. {last_upload_detail}"
+                    )
+                    last_log_time = now
+
+            def transfer_file(local_path, remote_path):
+                if self.cancel.is_set():
+                    return "cancelled", local_path, ""
+                try:
+                    remote.upload(share, remote_path, local_path)
+                    return "sent", local_path, ""
+                except Exception as error:
+                    return "failed", local_path, str(error)
+
+            def record_completed():
+                nonlocal sent, failed, done, last_log_time, last_upload_detail
+                if not pending:
+                    return
+                completed, _ = wait(pending, timeout=0.25, return_when=FIRST_COMPLETED)
+                if not completed:
+                    report_progress()
+                    return
+                for future in completed:
+                    pending.remove(future)
+                    result, local_path, error = future.result()
+                    if result == "cancelled":
+                        continue
+                    done += 1
+                    fname = os.path.basename(local_path)
+                    if result == "sent":
+                        sent += 1
+                        last_upload_detail = f"Último enviado: {fname}."
+                    elif result == "failed":
+                        failed += 1
+                        last_upload_detail = f"Falha em {fname}: {error}"
+                    else:
+                        continue
+                    report_progress()
+
+            with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                for local_path, remote_path in upload_files:
+                    if self.cancel.is_set():
+                        cancelled = True
+                        break
+                    pending.add(executor.submit(transfer_file, local_path, remote_path))
+                    if len(pending) >= max_workers * 2:
+                        record_completed()
+
+                while pending:
+                    record_completed()
+
+            if upload_started:
+                report_progress(force=True)
+            if cancelled or self.cancel.is_set():
+                self.say(f"Backup cancelado: {sent} enviados, {skipped} inalterados, {failed} falhas.")
+            else:
+                self.say(f"Concluído: {sent} enviados, {skipped} inalterados, {failed} falhas.")
+                self.q.put(("progress_value", (1.0, "⏳ 100% (Backup concluído)")))
+            self.ui(self.refresh)
+        finally:
+            self.transfer_in_progress = False
 
 
 if __name__ == "__main__":
