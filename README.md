@@ -224,6 +224,8 @@ Conecta por SSH ao servidor e usuário da sessão autenticada. Permite usar senh
 
 ![Terminal SSH](assets/06_tela_terminal.png)
 
+![Terminal SSH](assets/07_tela_sshconectado.png)
+
 ## Fluxo de dados
 
 ```text
