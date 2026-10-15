@@ -11,6 +11,7 @@ import hashlib
 import time
 from datetime import datetime, timezone
 import tkinter as tk
+import tkinter.font as tkfont
 import customtkinter as ctk
 from concurrent.futures import ThreadPoolExecutor
 from tkinter import filedialog
@@ -990,12 +991,12 @@ class App(ctk.CTk):
         VariableLabel(controls, self.ssh_status).pack(side="left", padx=12)
         self._update_ssh_toggle_button()
 
-        key_controls = ctk.CTkFrame(page, fg_color="transparent")
-        key_controls.pack(fill="x", padx=8, pady=(0, 8))
-        ctk.CTkLabel(key_controls, text="🔑 Arquivo de chave").pack(side="left", padx=(0, 6))
+        self.ssh_key_controls = ctk.CTkFrame(page, fg_color="transparent")
+        self.ssh_key_controls.pack(fill="x", padx=8, pady=(0, 8))
+        ctk.CTkLabel(self.ssh_key_controls, text="🔑 Arquivo de chave").pack(side="left", padx=(0, 6))
         self.ssh_key_path = tk.StringVar()
         key_path_entry = ctk.CTkEntry(
-            key_controls, textvariable=self.ssh_key_path,
+            self.ssh_key_controls, textvariable=self.ssh_key_path,
             fg_color=THEME_PALETTE["input"],
         )
         key_path_entry.pack(
@@ -1004,23 +1005,61 @@ class App(ctk.CTk):
         key_path_entry.bind("<FocusOut>", lambda _event: self._save_settings())
         key_path_entry.bind("<Return>", lambda _event: self._save_settings())
         self._accent_button(
-            key_controls, text="Selecionar...", command=self._select_ssh_key,
+            self.ssh_key_controls, text="Selecionar...", command=self._select_ssh_key,
         ).pack(side="left", padx=6)
-        ctk.CTkLabel(key_controls, text="🔒 Passphrase").pack(side="left", padx=(4, 6))
+        ctk.CTkLabel(self.ssh_key_controls, text="🔒 Passphrase").pack(side="left", padx=(4, 6))
         self.ssh_key_passphrase_entry = ctk.CTkEntry(
-            key_controls, width=160, show="*", placeholder_text="Opcional",
+            self.ssh_key_controls, width=160, show="*", placeholder_text="Opcional",
             fg_color=THEME_PALETTE["input"],
         )
         self.ssh_key_passphrase_entry.pack(side="left")
 
+        families = set(tkfont.families())
+        self.terminal_font_family = next(
+            (f for f in ("Cascadia Mono", "DejaVu Sans Mono", "Consolas") if f in families),
+            "Courier New",
+        )
         self.terminal_output = ctk.CTkTextbox(
-            page, corner_radius=8, font=ctk.CTkFont(family="Consolas", size=13),
+            page, corner_radius=8,
+            font=ctk.CTkFont(family=self.terminal_font_family, size=13),
             wrap="none", fg_color="#101214", text_color="#d6d6d6",
         )
         self.terminal_output.pack(fill="both", expand=True, padx=8, pady=(0, 8))
         terminal_widget = self.terminal_output._textbox
-        terminal_widget.configure(insertbackground="#ffffff", takefocus=True)
+        terminal_widget.configure(
+            insertbackground="#ffffff", takefocus=True,
+            spacing1=0, spacing2=0, spacing3=0, padx=0, pady=0,
+        )
         terminal_widget.bind("<KeyPress>", self._send_ssh_key)
+        terminal_widget.bind("<Configure>", self._on_terminal_resize)
+        self.terminal_measure_font = tkfont.Font(family=self.terminal_font_family, size=13)
+        self.terminal_output.configure(
+            height=24 * self.terminal_measure_font.metrics("linespace") + 8,
+        )
+
+    def _terminal_size(self):
+        widget = self.terminal_output._textbox
+        char_width = max(1, self.terminal_measure_font.measure("0"))
+        line_height = max(1, self.terminal_measure_font.metrics("linespace"))
+        columns = max(20, widget.winfo_width() // char_width - 1)
+        rows = max(24, widget.winfo_height() // line_height)
+        return columns, rows
+
+    def _on_terminal_resize(self, _event=None):
+        screen = self.ssh_screen
+        channel = self.ssh_channel
+        if screen is None or channel is None or channel.closed:
+            return
+        columns, rows = self._terminal_size()
+        if (columns, rows) == (screen.columns, screen.lines):
+            return
+        screen.resize(rows, columns)
+        self.ssh_rendered_rows = []
+        self.ssh_screen_dirty = True
+        try:
+            channel.resize_pty(width=columns, height=rows)
+        except Exception:
+            pass
 
     def _select_ssh_key(self):
         key_path = filedialog.askopenfilename(
@@ -1068,6 +1107,20 @@ class App(ctk.CTk):
             button.configure(text="Desconectar", state="normal")
         else:
             button.configure(text="Conectar SSH", state="normal")
+        self._update_ssh_key_controls_visibility()
+
+    def _update_ssh_key_controls_visibility(self):
+        controls = getattr(self, "ssh_key_controls", None)
+        terminal = getattr(self, "terminal_output", None)
+        if controls is None or terminal is None:
+            return
+
+        should_show = not self.ssh_connecting and not self.ssh_client
+        is_visible = bool(controls.winfo_manager())
+        if should_show and not is_visible:
+            controls.pack(fill="x", padx=8, pady=(0, 8), before=terminal)
+        elif not should_show and is_visible:
+            controls.pack_forget()
 
     def _connect_ssh(self):
         if not self.authenticated or not self.remote or not self.authenticated_password:
@@ -1089,6 +1142,8 @@ class App(ctk.CTk):
         self.ssh_status.set(f"Conectando a {username}@{host}:22...")
         client = paramiko.SSHClient()
         self.ssh_connecting_client = client
+        self.update_idletasks()
+        columns, rows = self._terminal_size()
 
         def run():
             try:
@@ -1103,7 +1158,7 @@ class App(ctk.CTk):
                     timeout=8, banner_timeout=8, auth_timeout=8,
                     allow_agent=False, look_for_keys=False,
                 )
-                channel = client.invoke_shell(term="xterm", width=120, height=24)
+                channel = client.invoke_shell(term="xterm-256color", width=columns, height=rows)
                 self.ui(lambda: self._ssh_connection_result(generation, client, channel, None))
             except Exception as error:
                 client.close()
@@ -1127,7 +1182,12 @@ class App(ctk.CTk):
         self.ssh_client = client
         self._update_ssh_toggle_button()
         self.ssh_channel = channel
-        self.ssh_screen = pyte.Screen(120, 24)
+        columns, rows = self._terminal_size()
+        self.ssh_screen = pyte.Screen(columns, rows)
+        try:
+            channel.resize_pty(width=columns, height=rows)
+        except Exception:
+            pass
         self.ssh_stream = pyte.Stream(self.ssh_screen)
         self.ssh_decoder = codecs.getincrementaldecoder("utf-8")("replace")
         self.ssh_rendered_rows = []
@@ -1246,7 +1306,9 @@ class App(ctk.CTk):
                     cell.fg, cell.bg, cell.bold, cell.italics,
                     cell.underscore, cell.reverse,
                 )
-                rendered_row.append((cell.data or " ", style))
+                if cell.data == "":
+                    continue  # segunda célula de caractere largo
+                rendered_row.append((cell.data, style))
             signature = tuple(rendered_row)
             if self.ssh_rendered_rows[row_index] == signature:
                 continue
@@ -1286,7 +1348,7 @@ class App(ctk.CTk):
             if style[5]:
                 foreground, background = background, foreground
             font_style = (
-                "Consolas", 13, "bold" if style[2] else "normal",
+                self.terminal_font_family, 13, "bold" if style[2] else "normal",
                 "italic" if style[3] else "roman",
             )
             terminal_widget.tag_configure(

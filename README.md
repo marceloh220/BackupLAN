@@ -6,7 +6,8 @@ Este projeto reúne o script de configuração de um NAS Debian, um agente que p
 
 | Componente | Arquivo | Função |
 |---|---|---|
-| Configuração do NAS | `nas-setup.sh` | Prepara armazenamento, Samba, descoberta de rede, firewall e, opcionalmente, NTP. |
+| Configuração do NAS | `nas-setup.sh` | Prepara IP estático, armazenamento, Samba, descoberta de rede, NTP, DNS/DHCP com bloqueio de anúncios/rastreadores e firewall. |
+| Teste de velocidade | `nas-speedtest.py` | Mede download, upload e ping; registra resultados em JSONL, lista testes e gera gráficos. |
 | Agente de estatísticas | `marcelinoServer.py` | Publica métricas do servidor e regras de compartilhamento Samba em JSON. |
 | Serviço systemd | `marcelinoServer.service` | Executa o agente após a inicialização do sistema. |
 | Instalador do agente | `install_marcelinoServer.sh` | Instala o agente, configura o arquivo de ambiente e inicia o serviço. |
@@ -25,14 +26,17 @@ As etapas podem ser executadas separadamente ou combinadas:
 
 | Opção | O que configura |
 |---|---|
-| `--install` | Instala mdadm, Samba, Avahi, UFW, `python3-psutil`, `smartmontools`, `pciutils`, `fontconfig`, utilitários de armazenamento e WS-Discovery; instala `xfsprogs` ou `btrfs-progs` conforme `RAID_FILESYSTEM`, além de cryptsetup e chrony conforme as opções configuradas. |
+| `--install` | Instala mdadm, Samba, Avahi, UFW, `python3-psutil`, `smartmontools`, `pciutils`, `fontconfig`, utilitários de armazenamento e WS-Discovery; instala `xfsprogs` ou `btrfs-progs` conforme `RAID_FILESYSTEM`, além de cryptsetup, chrony, `dnsmasq` e `curl` conforme as opções configuradas. |
+| `--network` | Configura o IP estático `NAS_IP`/`NAS_PREFIX` na interface (NetworkManager ou `/etc/network/interfaces`, com backup em `interfaces.orig`). A conexão SSH atual pode cair; reconecte no novo IP. |
 | `--raid` | Cria o RAID com `mdadm` e atualiza a configuração de boot. |
 | `--storage` | Formata e monta o volume; pode configurar criptografia LUKS e desbloqueio automático. |
 | `--samba` | Cria usuário/grupo, diretórios, permissões e shares; valida a configuração com `testparm` e reinicia Samba. |
 | `--discovery` | Ativa anúncio SMB por Avahi/mDNS e WS-Discovery quando disponível. |
 | `--ntp` | Configura o chrony como servidor de horário da LAN quando `NTP_ENABLE=yes`. |
-| `--firewall` | Configura UFW para SSH, Samba, descoberta e, se habilitado, NTP. A configuração redefine as regras atuais do UFW. |
-| `--all` | Executa as etapas na ordem recomendada: instalação, RAID, armazenamento, Samba, descoberta, NTP e firewall. |
+| `--dns` | Configura o dnsmasq como DNS e DHCP da LAN (veja abaixo). |
+| `--speedtest` | Instala `nas-speedtest` (a partir de `nas-speedtest.py`) e os timers de teste e gráfico (veja abaixo). |
+| `--firewall` | Configura UFW para SSH, Samba, descoberta, DNS (53), DHCP (67/udp) e, se habilitado, NTP. A configuração redefine as regras atuais do UFW. |
+| `--all` | Executa as etapas na ordem recomendada: instalação, rede, RAID, armazenamento, Samba, descoberta, NTP, DNS/DHCP e firewall. |
 
 As opções são editadas na seção **CONFIGURAÇÃO** no começo do script. Os valores fornecidos incluem:
 
@@ -41,7 +45,66 @@ As opções são editadas na seção **CONFIGURAÇÃO** no começo do script. Os
 - Volume em `/srv/nas`; LUKS habilitado sobre `/dev/md0`, com mapeamento `nas_crypt`, keyfile `/etc/nas.key` e desbloqueio automático.
 - Shares `Publico`, `Privado`, `Backup`, `Midia` e `Marcelo`.
 - `Publico` permite convidados; `Backup` e `Midia` usam o grupo `nasgroup`; `Privado` e `Marcelo` são restritos ao usuário `marcelo`.
-- Grupo de trabalho `WORKGROUP`, domínio `local`, detecção automática da rede local, SSH na porta 22 e chrony habilitado.
+- Grupo de trabalho `WORKGROUP`, domínio `lan` (`LOCAL_DOMAIN`), SSH na porta 22 e chrony habilitado.
+- Rede: `IP_INET`, `IP_GATEWAY`, `IP_RANGE_START`, `IP_RANGE_END`, `DNS_UPSTREAM` e `LOCAL_DOMAIN` ficam no topo do script e alimentam `NAS_IP`, `NET_GATEWAY`, a faixa DHCP e o domínio. Ajuste-os para a sua rede (o NAS, o gateway e a faixa DHCP devem estar na mesma sub-rede).
+
+### Teste de velocidade da internet
+
+A etapa `--speedtest` (`SPEEDTEST_ENABLE`) instala `speedtest-cli` e `python3-matplotlib`, copia `nas-speedtest.py` para `/usr/local/bin/nas-speedtest` e ativa dois timers:
+
+- `nas-speedtest.timer`: um teste de hora em hora, gravado em `SPEEDTEST_LOG` (`/var/log/nas-speedtest.jsonl`).
+- `nas-speedtest-graph.timer`: todo dia às `SPEEDTEST_GRAPH_TIME` (23:55) gera o gráfico das últimas 24 horas em `SPEEDTEST_OUT/ANO/MES/` (padrão `/srv/marcelo/internet_test`), a pasta é escolhida pela data do gráfico.
+
+Uso manual:
+
+```bash
+sudo nas-speedtest test              # teste novo, registrado no log
+nas-speedtest log -n 10              # últimos 10 testes
+nas-speedtest --log /caminho/log.jsonl log -n 10  # usa outro arquivo de log
+sudo nas-speedtest graph -n 24       # gráfico dos últimos 24 testes
+sudo nas-speedtest graph --hours 24  # gráfico das últimas 24 horas
+```
+
+No subcomando `log`, use `-n` para definir a quantidade de testes. A opção global `--log` indica o caminho do arquivo JSON; por isso, `nas-speedtest --log 10 log` procura um arquivo chamado `10` e pode informar que não há testes registrados.
+
+#### Gerenciar timers
+
+Consulte o estado dos timers e os próximos horários programados:
+
+```bash
+systemctl list-timers --all 'nas-speedtest*'
+sudo systemctl status nas-speedtest.timer nas-speedtest-graph.timer
+```
+
+Para executar cada tarefa imediatamente, sem esperar pelo próximo horário:
+
+```bash
+sudo systemctl start nas-speedtest.service        # executa um teste e atualiza o log
+sudo systemctl start nas-speedtest-graph.service  # gera o gráfico das últimas 24 horas
+```
+
+Para pausar os agendamentos e impedir que voltem após reiniciar, ou para reativá-los:
+
+```bash
+sudo systemctl disable --now nas-speedtest.timer nas-speedtest-graph.timer
+sudo systemctl enable --now nas-speedtest.timer nas-speedtest-graph.timer
+```
+
+Consulte a saída das últimas execuções pelo journal do systemd:
+
+```bash
+sudo journalctl -u nas-speedtest.service -n 50 --no-pager
+sudo journalctl -u nas-speedtest-graph.service -n 50 --no-pager
+```
+
+Os PNG são nomeados `speedtest_AAAA-MM-DD_<periodo>.png` (por exemplo `speedtest_2026-10-15_24h.png`), com a data do último resultado incluído, e herdam o dono da pasta base.
+
+### IP estático, DNS e DHCP
+
+- **IP estático (`--network`):** controlado por `NET_STATIC`, `NAS_IP`, `NAS_PREFIX`, `NET_IFACE` e `NET_GATEWAY`. Interface e gateway vazios são detectados pela rota padrão. Se `LAN_CIDR` estiver vazio, é derivado de `NAS_IP/NAS_PREFIX`.
+- **DNS (`--dns`, `DNS_ENABLE`):** dnsmasq com cache, resolvedores externos em `DNS_UPSTREAM` e domínio local `DNS_DOMAIN`. Clientes DHCP são registrados por nome (`pc1` e `pc1.lan`) e o próprio NAS responde pelo `NAS_IP`. Máquinas com IP fixo precisam de entrada no `/etc/hosts` do NAS ou de `dhcp-host=` em `/etc/dnsmasq.d/nas.conf`. O `systemd-resolved` é desativado e o `/etc/resolv.conf` do NAS aponta para `127.0.0.1`.
+- **Bloqueio de anúncios, rastreadores e malware:** as listas em `DNS_BLOCKLISTS` (padrão: StevenBlack, HaGeZi Pro e HaGeZi TIF medium) são consolidadas em `/var/lib/nas-dns/blocklist.hosts` por `/usr/local/sbin/update-dns-blocklist`, executado na instalação e semanalmente pelo timer `nas-dns-blocklist.timer`. São aceitos os formatos hosts e dnsmasq (`local=/dominio/`).
+- **DHCP (`DHCP_ENABLE`):** faixa `DHCP_RANGE_START`–`DHCP_RANGE_END` com concessão `DHCP_LEASE`; entrega gateway, o NAS como DNS e, com NTP ativo, o NAS como servidor de horário. Desative o DHCP do roteador antes para evitar dois servidores na rede.
 
 Para escolher o formato, altere `RAID_FILESYSTEM` na seção **CONFIGURAÇÃO** antes de executar, por exemplo:
 

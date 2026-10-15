@@ -7,6 +7,14 @@ set -euo pipefail
 # CONFIGURAÇÃO
 ###############################################################################
 
+# --- Rede ---
+IP_INET="192.168.0.1"              # endereço IP da interface de rede do NAS
+IP_GATEWAY="192.168.0.254"         # gateway/roteador de internet da interface de rede do NAS
+IP_RANGE_START="192.168.0.100"     # início do intervalo DHCP
+IP_RANGE_END="192.168.0.200"       # fim do intervalo DHCP
+DNS_UPSTREAM=("1.1.1.1" "9.9.9.9") # resolvedores externos (Cloudflare e Quad9)
+LOCAL_DOMAIN="lan"                 # domínio local usado para configuração de rede e Samba
+
 # --- Sistema ---
 SBIN_DIR="/sbin"                    # diretório dos executáveis administrativos
 
@@ -48,15 +56,47 @@ USER_SHARES=("Marcelo:marcelo" "Privado:marcelo")  # pares share:usuario acessí
 SAMBA_USER="marcelo"                               # usuário Samba (criado se não existir)
 SAMBA_GROUP="nasgroup"                             # grupo Samba (criado se não existir)
 WORKGROUP="WORKGROUP"                              # grupo de trabalho do Samba
-DOMAIN="local"                                     # domínio da rede local (para Samba)
+DOMAIN="$LOCAL_DOMAIN"                             # domínio da rede local (para Samba)
+
+# --- IP estático ---
+NET_STATIC="yes"                   # yes = configura IP estático no Debian
+NAS_IP="$IP_INET"                  # endereço IP do NAS (também usado como DNS/DHCP)
+NAS_PREFIX=24                      # tamanho da máscara (24 = 255.255.255.0)
+NET_IFACE=""                       # interface de rede. Vazio = detecta pela rota padrão
+NET_GATEWAY="$IP_GATEWAY"          # gateway/roteador de internet. Vazio = usa o gateway atual
+
+# --- DNS (dnsmasq) com filtro de anúncios, rastreadores e malware ---
+DNS_ENABLE="yes"
+# Resolvedores efetivos: DNS_UPSTREAM; se vazio, usa Cloudflare e Quad9
+DNS_UPSTREAM_int=("1.1.1.1" "9.9.9.9")
+[[ -z "${DNS_UPSTREAM[*]:-}" ]] || DNS_UPSTREAM_int=("${DNS_UPSTREAM[@]}")
+DNS_DOMAIN="$LOCAL_DOMAIN"         # domínio local entregue aos clientes
+# Listas em formato hosts ou dnsmasq (local=/dominio/)
+DNS_BLOCKLISTS=(
+  "https://raw.githubusercontent.com/StevenBlack/hosts/master/hosts"                    # anúncios + malware
+  "https://raw.githubusercontent.com/hagezi/dns-blocklists/main/dnsmasq/pro.txt"        # anúncios, rastreadores, spyware
+  "https://raw.githubusercontent.com/hagezi/dns-blocklists/main/dnsmasq/tif.medium.txt" # ameaças (malware, phishing)
+)
+
+# --- DHCP (dnsmasq) ---
+DHCP_ENABLE="yes"
+DHCP_RANGE_START="$IP_RANGE_START"
+DHCP_RANGE_END="$IP_RANGE_END"
+DHCP_LEASE="12h"
 
 # --- Rede / Firewall ---
-LAN_CIDR=""                        # ex.: "192.168.1.0/24". Vazio = detecta automaticamente
+LAN_CIDR=""                        # ex.: "192.168.1.0/24". Vazio = deriva de NAS_IP/NAS_PREFIX (ou detecta)
 SSH_PORT=22                        # porta SSH do servidor NAS
 
 # --- NTP (servidor de horário para a rede local) ---
 NTP_ENABLE="yes"                              # yes = instala e configura o chrony como servidor NTP da LAN
 NTP_UPSTREAM=("pool.ntp.br" "a.st1.ntp.br")   # fontes de horário externas
+
+# --- Teste de velocidade da internet ---
+SPEEDTEST_ENABLE="yes"                                  # yes = instala nas-speedtest e os timers
+SPEEDTEST_LOG="/var/log/nas-speedtest.jsonl"             # log dos testes
+SPEEDTEST_OUT="/srv/marcelo/internet_test"               # gráficos salvos em ano/mes dentro desta pasta
+SPEEDTEST_GRAPH_TIME="23:55"                             # horário do gráfico diário (últimas 24 horas)
 
 ###############################################################################
 # FUNÇÕES
@@ -73,7 +113,16 @@ validate_raid_filesystem() {
   esac
 }
 
+detect_iface() {
+  [[ -n "$NET_IFACE" ]] || NET_IFACE=$(ip -4 route show default | awk '{print $5; exit}')
+  [[ -n "$NET_IFACE" ]] || die "Interface padrão não encontrada; defina NET_IFACE."
+}
+
 detect_lan_cidr() {
+  if [[ "$NET_STATIC" == "yes" ]]; then
+    python3 -c "import sys,ipaddress; print(ipaddress.ip_interface(sys.argv[1]).network)" "$NAS_IP/$NAS_PREFIX"
+    return
+  fi
   local iface
   iface=$(ip -4 route show default | awk '{print $5; exit}')
   [[ -n "$iface" ]] || die "Interface padrão não encontrada; defina LAN_CIDR."
@@ -94,6 +143,10 @@ install_packages() {
   # No Debian 13+ o gerador do crypttab fica em pacote separado; em versões antigas ele não existe.
   [[ -n "$CRYPT_DEVICE" ]] && { apt-get install -y systemd-cryptsetup || true; }
   [[ "$NTP_ENABLE" == "yes" ]] && apt-get install -y chrony
+  [[ "$SPEEDTEST_ENABLE" == "yes" ]] && apt-get install -y speedtest-cli python3-matplotlib
+  if [[ "$DNS_ENABLE" == "yes" || "$DHCP_ENABLE" == "yes" ]]; then
+    apt-get install -y dnsmasq curl
+  fi
   # Nome do pacote WS-Discovery varia entre versões do Debian
   local p
   for p in wsdd-server wsdd wsdd2; do
@@ -118,7 +171,10 @@ Opções:
   --storage      Configura o sistema de arquivos e a criptografia/montagem
   --samba        Configura usuários, permissões e compartilhamentos Samba
   --discovery    Ativa descoberta de rede via Avahi e WS-Discovery
+  --network      Configura o IP estático (NAS_IP)
   --ntp          Configura o servidor NTP (se NTP_ENABLE=yes)
+  --dns          Configura o servidor DNS/DHCP com listas de bloqueio
+  --speedtest    Instala o teste de velocidade da internet e seus timers
   --firewall     Configura o firewall para os serviços da rede local
   -h, --help     Mostra esta ajuda
 
@@ -264,6 +320,7 @@ setup_samba() {
    map to guest = Bad User
    server min protocol = SMB2
    restrict anonymous = 2
+   client signing = mandatory
    hosts allow = $LAN_CIDR 127.0.0.1
    hosts deny = 0.0.0.0/0
    disable netbios = no
@@ -411,6 +468,148 @@ EOF
   fi
 }
 
+setup_network() {
+  [[ "$NET_STATIC" == "yes" ]] || return 0
+  detect_iface
+  local gw="$NET_GATEWAY"
+  [[ -n "$gw" ]] || gw=$(ip -4 route show default | awk '{print $3; exit}')
+  [[ -n "$gw" ]] || die "Gateway não encontrado; defina NET_GATEWAY."
+  log "Configurando IP estático $NAS_IP/$NAS_PREFIX em $NET_IFACE (gateway $gw)..."
+  warn "A conexão atual (ex.: SSH) pode cair; reconecte em $NAS_IP."
+
+  if systemctl is-active --quiet NetworkManager; then
+    local con
+    con=$(nmcli -g GENERAL.CONNECTION device show "$NET_IFACE")
+    [[ -n "$con" ]] || die "Nenhuma conexão NetworkManager em $NET_IFACE."
+    nmcli connection modify "$con" ipv4.method manual ipv4.addresses "$NAS_IP/$NAS_PREFIX" \
+      ipv4.gateway "$gw" ipv4.dns "127.0.0.1 ${DNS_UPSTREAM_int[*]}"
+    nmcli connection up "$con" || warn "Falha ao reativar a conexão; reinicie o sistema."
+  elif [[ -f /etc/network/interfaces ]]; then
+    cp -n /etc/network/interfaces /etc/network/interfaces.orig || true
+    # Remove configuração anterior da interface
+    sed -i -E "/^(auto|allow-hotplug|iface)[[:space:]]+$NET_IFACE([[:space:]]|\$)/,/^$/d" /etc/network/interfaces
+    cat >> /etc/network/interfaces <<EOF
+
+auto $NET_IFACE
+iface $NET_IFACE inet static
+    address $NAS_IP/$NAS_PREFIX
+    gateway $gw
+
+EOF
+    systemctl restart networking || warn "Falha ao reiniciar a rede; reinicie o sistema."
+  else
+    die "Gerenciador de rede não suportado (use NetworkManager ou ifupdown)."
+  fi
+}
+
+update_blocklist_script() {
+  local urls="" u
+  for u in "${DNS_BLOCKLISTS[@]}"; do urls+="  \"$u\""$'\n'; done
+  mkdir -p /var/lib/nas-dns
+  cat > /usr/local/sbin/update-dns-blocklist <<EOF
+#!/usr/bin/env bash
+# Gerado por nas-setup.sh: baixa e consolida as listas de bloqueio do dnsmasq.
+set -uo pipefail
+OUT=/var/lib/nas-dns/blocklist.hosts
+TMP=\$(mktemp)
+URLS=(
+$urls)
+for url in "\${URLS[@]}"; do
+  curl -fsSL --max-time 120 "\$url" || echo "Falha ao baixar \$url" >&2
+done | awk '
+  \$1=="0.0.0.0" || \$1=="127.0.0.1" { d=tolower(\$2) }
+  \$0 ~ /^(local|address|server)=\\// { split(\$0, a, "/"); d=tolower(a[2]) }
+  d != "" { if (d!="" && d!~/^(localhost|localhost.localdomain|local|broadcasthost|0.0.0.0)\$/ && !(d in s)) { s[d]=1; print "0.0.0.0 " d }; d="" }' > "\$TMP"
+if [[ -s "\$TMP" ]]; then
+  install -m 644 "\$TMP" "\$OUT"
+  systemctl reload dnsmasq 2>/dev/null || systemctl restart dnsmasq
+fi
+rm -f "\$TMP"
+EOF
+  chmod 755 /usr/local/sbin/update-dns-blocklist
+
+  cat > /etc/systemd/system/nas-dns-blocklist.service <<'EOF'
+[Unit]
+Description=Atualiza listas de bloqueio do DNS
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/update-dns-blocklist
+EOF
+  cat > /etc/systemd/system/nas-dns-blocklist.timer <<'EOF'
+[Unit]
+Description=Atualização semanal das listas de bloqueio do DNS
+
+[Timer]
+OnCalendar=weekly
+RandomizedDelaySec=1h
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+EOF
+  systemctl daemon-reload
+  systemctl enable --now nas-dns-blocklist.timer
+}
+
+setup_dns() {
+  [[ "$DNS_ENABLE" == "yes" || "$DHCP_ENABLE" == "yes" ]] || return 0
+  detect_iface
+  local gw="$NET_GATEWAY"
+  [[ -n "$gw" ]] || gw=$(ip -4 route show default | awk '{print $3; exit}')
+  log "Configurando dnsmasq (DNS: $DNS_ENABLE, DHCP: $DHCP_ENABLE)..."
+
+  # systemd-resolved ocupa a porta 53
+  systemctl disable --now systemd-resolved 2>/dev/null || true
+
+  {
+    echo "# Gerado por nas-setup.sh"
+    echo "interface=$NET_IFACE"
+    echo "bind-interfaces"
+    echo "domain-needed"
+    echo "bogus-priv"
+    echo "no-resolv"
+    echo "domain=$DNS_DOMAIN"
+    echo "local=/$DNS_DOMAIN/"
+    echo "expand-hosts"
+    # Evita que o /etc/hosts (127.0.1.1) seja entregue aos clientes como endereço do NAS
+    echo "host-record=$(hostname),$(hostname).$DNS_DOMAIN,$NAS_IP"
+    local s
+    for s in "${DNS_UPSTREAM_int[@]}"; do echo "server=$s"; done
+    if [[ "$DNS_ENABLE" == "yes" ]]; then
+      echo "cache-size=10000"
+      echo "addn-hosts=/var/lib/nas-dns/blocklist.hosts"
+    else
+      echo "port=0"
+    fi
+    if [[ "$DHCP_ENABLE" == "yes" ]]; then
+      echo "dhcp-authoritative"
+      echo "dhcp-range=$DHCP_RANGE_START,$DHCP_RANGE_END,$DHCP_LEASE"
+      [[ -n "$gw" ]] && echo "dhcp-option=option:router,$gw"
+      echo "dhcp-option=option:dns-server,$NAS_IP"
+      [[ "$NTP_ENABLE" == "yes" ]] && echo "dhcp-option=option:ntp-server,$NAS_IP"
+    fi
+  } > /etc/dnsmasq.d/nas.conf
+
+  mkdir -p /var/lib/nas-dns
+  touch /var/lib/nas-dns/blocklist.hosts
+  if [[ "$DNS_ENABLE" == "yes" ]]; then
+    update_blocklist_script
+    log "Baixando listas de bloqueio..."
+    /usr/local/sbin/update-dns-blocklist || warn "Falha ao baixar as listas."
+    # O próprio NAS passa a usar o DNS local
+    if [[ -L /etc/resolv.conf ]]; then rm -f /etc/resolv.conf; fi
+    chattr -i /etc/resolv.conf 2>/dev/null || true
+    printf 'nameserver 127.0.0.1\nsearch %s\n' "$DNS_DOMAIN" > /etc/resolv.conf
+  fi
+
+  dnsmasq --test || die "Configuração do dnsmasq inválida."
+  systemctl enable dnsmasq
+  systemctl restart dnsmasq
+}
+
 setup_ntp() {
   [[ "$NTP_ENABLE" == "yes" ]] || return 0
   log "Configurando servidor NTP (chrony) para $LAN_CIDR..."
@@ -433,6 +632,65 @@ EOF
   systemctl restart chrony
 }
 
+setup_speedtest() {
+  [[ "$SPEEDTEST_ENABLE" == "yes" ]] || return 0
+  local src
+  src="$(dirname "$(readlink -f "$0")")/nas-speedtest.py"
+  [[ -f "$src" ]] || die "$src não encontrado."
+  log "Instalando teste de velocidade da internet..."
+
+  install -m 755 "$src" /usr/local/bin/nas-speedtest
+  sed -i "s|^DEFAULT_LOG = .*|DEFAULT_LOG = \"$SPEEDTEST_LOG\"|; s|^DEFAULT_OUT = .*|DEFAULT_OUT = \"$SPEEDTEST_OUT\"|" /usr/local/bin/nas-speedtest
+
+  mkdir -p "$SPEEDTEST_OUT"
+  id "$SAMBA_USER" >/dev/null 2>&1 && chown "$SAMBA_USER":"$(id -gn "$SAMBA_USER")" "$SPEEDTEST_OUT"
+  touch "$SPEEDTEST_LOG"
+  chmod 644 "$SPEEDTEST_LOG"
+
+  cat > /etc/systemd/system/nas-speedtest.service <<'EOF'
+[Unit]
+Description=Teste de velocidade da internet
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/nas-speedtest test
+EOF
+  cat > /etc/systemd/system/nas-speedtest.timer <<'EOF'
+[Unit]
+Description=Teste de velocidade da internet de hora em hora
+
+[Timer]
+OnCalendar=hourly
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+EOF
+  cat > /etc/systemd/system/nas-speedtest-graph.service <<'EOF'
+[Unit]
+Description=Gráfico diário da velocidade da internet
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/nas-speedtest graph --hours 24
+EOF
+  cat > /etc/systemd/system/nas-speedtest-graph.timer <<EOF
+[Unit]
+Description=Gráfico diário da velocidade da internet
+
+[Timer]
+OnCalendar=*-*-* $SPEEDTEST_GRAPH_TIME:00
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+EOF
+  systemctl daemon-reload
+  systemctl enable --now nas-speedtest.timer nas-speedtest-graph.timer
+}
+
 setup_firewall() {
   log "Configurando firewall (ufw) para $LAN_CIDR..."
   "$SBIN_DIR/ufw" --force reset >/dev/null
@@ -446,6 +704,14 @@ setup_firewall() {
   "$SBIN_DIR/ufw" allow from "$LAN_CIDR" to any port 3702 proto udp comment 'WS-Discovery'
   "$SBIN_DIR/ufw" allow from "$LAN_CIDR" to any port 5357 proto tcp comment 'WSD HTTP'
   [[ "$NTP_ENABLE" == "yes" ]] && "$SBIN_DIR/ufw" allow from "$LAN_CIDR" to any port 123 proto udp comment 'NTP'
+  if [[ "$DNS_ENABLE" == "yes" ]]; then
+    "$SBIN_DIR/ufw" allow from "$LAN_CIDR" to any port 53 comment 'DNS'
+  fi
+  if [[ "$DHCP_ENABLE" == "yes" ]]; then
+    detect_iface
+    # Clientes DHCP ainda não têm IP, então a origem não pode ser filtrada
+    "$SBIN_DIR/ufw" allow in on "$NET_IFACE" to any port 67 proto udp comment 'DHCP'
+  fi
 
   "$SBIN_DIR/ufw" --force enable
   "$SBIN_DIR/ufw" status verbose
@@ -472,7 +738,10 @@ while [[ $# -gt 0 ]]; do
     --storage)   SELECTED_STEPS+=(storage) ;;
     --samba)     SELECTED_STEPS+=(samba) ;;
     --discovery) SELECTED_STEPS+=(discovery) ;;
+    --network)   SELECTED_STEPS+=(network) ;;
     --ntp)       SELECTED_STEPS+=(ntp) ;;
+    --dns)       SELECTED_STEPS+=(dns) ;;
+    --speedtest) SELECTED_STEPS+=(speedtest) ;;
     --firewall)  SELECTED_STEPS+=(firewall) ;;
     -h|--help)   show_help; exit 0 ;;
     *)           die "Opção desconhecida: $1. Use --help para ver as opções." ;;
@@ -504,8 +773,17 @@ if [[ "$NEEDS_LAN" == "yes" ]]; then
 fi
 
 if [[ "$RUN_ALL" == "yes" ]]; then
-  SELECTED_STEPS=(install raid storage samba discovery ntp firewall)
+  SELECTED_STEPS=(install network raid storage samba discovery ntp dns speedtest firewall)
 fi
+
+# Executa na ordem canônica, independentemente da ordem dos argumentos
+ORDERED_STEPS=()
+for s in install network raid storage samba discovery ntp dns speedtest firewall; do
+  for step in "${SELECTED_STEPS[@]}"; do
+    [[ "$step" == "$s" ]] && ORDERED_STEPS+=("$s")
+  done
+done
+SELECTED_STEPS=("${ORDERED_STEPS[@]}")
 
 for step in "${SELECTED_STEPS[@]}"; do
   case "$step" in
@@ -514,7 +792,10 @@ for step in "${SELECTED_STEPS[@]}"; do
     storage)   setup_storage ;;
     samba)     setup_samba ;;
     discovery) detect_wsdd_package; setup_discovery ;;
+    network)   setup_network ;;
     ntp)       setup_ntp ;;
+    dns)       setup_dns ;;
+    speedtest) setup_speedtest ;;
     firewall)  setup_firewall ;;
   esac
 done
