@@ -4,13 +4,18 @@
 import argparse
 import glob
 import json
+import logging
+import math
 import os
 import platform
 import shutil
+import socket
 import subprocess
 import tempfile
 import time
+from collections import deque
 from datetime import datetime, timezone
+from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
 import psutil
@@ -19,11 +24,16 @@ STATUS_FILENAME = ".marcelinoSrv.json"
 DEFAULT_FILE_MODE = 0o644
 SMART_REFRESH_SECONDS = 60 * 60
 SYSTEM_INFO_REFRESH_SECONDS = 15 * 60
+DNS_ACCESS_LOG_PATH = Path("/var/log/marcelinoServer/dnsmasq-access.jsonl")
+DNS_JOURNAL_CURSOR_PATH = Path("/var/lib/marcelinoServer/dnsmasq-journal.cursor")
+SPEEDTEST_LOG_PATH = Path("/var/log/nas-speedtest.jsonl")
 _smart_cache = None
 _smart_cache_expires_at = 0.0
 _smart_sampled_at = None
 _system_info_cache = None
 _system_info_cache_expires_at = 0.0
+_dns_access_logger = None
+_speedtest_log_cache = None
 
 
 def _run_text_command(command, timeout=10):
@@ -554,6 +564,330 @@ def collect_system_filesystems():
     return sorted(filesystems, key=lambda filesystem: filesystem["device"].casefold())
 
 
+def collect_internet_status(log_path=SPEEDTEST_LOG_PATH):
+    global _speedtest_log_cache
+
+    local_address = "127.0.0.1"
+    probe = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        probe.connect(("10.255.255.255", 1))
+        local_address = probe.getsockname()[0]
+    except OSError:
+        pass
+    finally:
+        probe.close()
+
+    try:
+        log_stat = Path(log_path).stat()
+        signature = (str(log_path), log_stat.st_mtime_ns, log_stat.st_size)
+        log_error = None
+    except OSError as error:
+        signature = None
+        log_error = str(error)
+
+    if _speedtest_log_cache is None or _speedtest_log_cache[0] != signature:
+        entries = []
+        if signature is not None:
+            try:
+                with open(log_path, encoding="utf-8") as log_file:
+                    for line in deque(log_file, maxlen=10):
+                        try:
+                            entry = json.loads(line)
+                        except json.JSONDecodeError:
+                            continue
+                        if isinstance(entry, dict) and isinstance(entry.get("timestamp"), str):
+                            entries.append(entry)
+            except OSError as error:
+                log_error = str(error)
+        _speedtest_log_cache = (signature, entries, log_error)
+    else:
+        _, entries, log_error = _speedtest_log_cache
+
+    remote_address = next(
+        (entry["ip"] for entry in reversed(entries) if isinstance(entry.get("ip"), str) and entry["ip"]),
+        "",
+    )
+    return {
+        "local_ip": local_address,
+        "remote_ip": remote_address,
+        "tests": entries,
+        "log_error": log_error,
+    }
+
+
+def _read_dnsmasq_journal(cursor=None, limit=80, since=None):
+    command = [
+        "journalctl", "-u", "dnsmasq", "--no-pager", "-o", "json", "-n", str(limit),
+    ]
+    if cursor:
+        command.extend(("--after-cursor", cursor))
+    elif since:
+        command.extend(("--since", since))
+    try:
+        result = subprocess.run(
+            command, capture_output=True, text=True, encoding="utf-8",
+            errors="replace", timeout=8, check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as error:
+        return [], str(error)
+    if result.returncode != 0:
+        return [], result.stderr.strip() or "Falha ao consultar o journal."
+
+    entries = []
+    for line in result.stdout.splitlines():
+        try:
+            record = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        message = record.get("MESSAGE")
+        if not isinstance(message, str) or not message.strip():
+            continue
+        try:
+            sampled_at = datetime.fromtimestamp(
+                int(record.get("__REALTIME_TIMESTAMP", 0)) / 1_000_000,
+                timezone.utc,
+            ).isoformat(timespec="seconds")
+        except (TypeError, ValueError, OSError):
+            sampled_at = ""
+        entries.append({
+            "timestamp": sampled_at,
+            "message": message.strip(),
+            "cursor": record.get("__CURSOR", ""),
+        })
+    return entries, ""
+
+
+def _classify_dnsmasq_event(message):
+    lowered = message.casefold()
+    if any(marker in lowered for marker in (
+        "is 0.0.0.0", "is ::", "is 127.0.0.1", "is 127.0.1.1",
+        "nxdomain", "nodata", "servfail", "refused", "dhcpnak",
+    )):
+        return "blocked"
+    if any(marker in lowered for marker in (
+        "forwarded ", "cached ", "dhcpack", "dhcpoffer",
+    )):
+        return "allowed"
+    return None
+
+
+def _classified_dnsmasq_events(entries):
+    classified = []
+    for entry in entries:
+        classification = _classify_dnsmasq_event(entry["message"])
+        if classification is None:
+            continue
+        lowered = entry["message"].casefold()
+        kind = "dhcp" if "dhcp" in lowered else "dns"
+        classified.append({
+            "classification": classification,
+            "kind": kind,
+            "timestamp": entry["timestamp"],
+            "message": entry["message"],
+        })
+    return classified
+
+
+def _append_dns_access_log(events):
+    global _dns_access_logger
+    if not events:
+        return ""
+    try:
+        DNS_ACCESS_LOG_PATH.parent.mkdir(mode=0o750, parents=True, exist_ok=True)
+        if _dns_access_logger is None:
+            _dns_access_logger = logging.getLogger("marcelinoServer.dns_access")
+            _dns_access_logger.setLevel(logging.INFO)
+            _dns_access_logger.propagate = False
+            handler = RotatingFileHandler(
+                DNS_ACCESS_LOG_PATH, maxBytes=5 * 1024 * 1024,
+                backupCount=3, encoding="utf-8",
+            )
+            handler.setFormatter(logging.Formatter("%(message)s"))
+            _dns_access_logger.addHandler(handler)
+        for event in events:
+            _dns_access_logger.info(json.dumps(event, ensure_ascii=False, sort_keys=True))
+        for log_path in DNS_ACCESS_LOG_PATH.parent.glob(f"{DNS_ACCESS_LOG_PATH.name}*"):
+            os.chmod(log_path, 0o600)
+    except OSError as error:
+        return str(error)
+    return ""
+
+
+def _save_dns_journal_cursor(cursor):
+    if not cursor:
+        return ""
+    temp_path = None
+    try:
+        DNS_JOURNAL_CURSOR_PATH.parent.mkdir(mode=0o750, parents=True, exist_ok=True)
+        with tempfile.NamedTemporaryFile(
+            "w", encoding="utf-8", dir=DNS_JOURNAL_CURSOR_PATH.parent,
+            prefix=f"{DNS_JOURNAL_CURSOR_PATH.name}.", suffix=".tmp", delete=False,
+        ) as cursor_file:
+            temp_path = Path(cursor_file.name)
+            cursor_file.write(cursor)
+            cursor_file.flush()
+            os.fsync(cursor_file.fileno())
+        os.chmod(temp_path, 0o600)
+        os.replace(temp_path, DNS_JOURNAL_CURSOR_PATH)
+    except OSError as error:
+        return str(error)
+    finally:
+        if temp_path is not None and temp_path.exists():
+            temp_path.unlink()
+    return ""
+
+
+def collect_dns_dhcp():
+    dnsmasq_installed = shutil.which("dnsmasq") is not None
+    journalctl_installed = shutil.which("journalctl") is not None
+    service_state = _run_text_command(
+        ["systemctl", "show", "-p", "ActiveState", "--value", "dnsmasq"], timeout=5,
+    ) if dnsmasq_installed else "indisponível"
+    config_paths = [Path("/etc/dnsmasq.conf"), *Path("/etc/dnsmasq.d").glob("*.conf")]
+    port_disabled = False
+    dhcp_configured = False
+    for config_path in config_paths:
+        try:
+            lines = config_path.read_text(encoding="utf-8", errors="replace").splitlines()
+        except OSError:
+            continue
+        for line in lines:
+            directive = line.split("#", 1)[0].strip()
+            if not directive or "=" not in directive:
+                continue
+            key, value = (part.strip() for part in directive.split("=", 1))
+            if key == "port" and value == "0":
+                port_disabled = True
+            elif key == "dhcp-range":
+                dhcp_configured = True
+
+    leases = []
+    lease_paths = (
+        Path("/var/lib/misc/dnsmasq.leases"),
+        Path("/var/lib/dnsmasq/dnsmasq.leases"),
+    )
+    for lease_path in lease_paths:
+        try:
+            lease_lines = lease_path.read_text(encoding="utf-8", errors="replace").splitlines()
+        except OSError:
+            continue
+        for line in lease_lines:
+            fields = line.split(maxsplit=4)
+            if len(fields) < 4:
+                continue
+            try:
+                expiry = int(fields[0])
+            except ValueError:
+                continue
+            leases.append({
+                "expires_at": (
+                    datetime.fromtimestamp(expiry, timezone.utc).isoformat(timespec="seconds")
+                    if expiry else None
+                ),
+                "mac": fields[1],
+                "ip": fields[2],
+                "hostname": fields[3] if fields[3] != "*" else "",
+                "client_id": fields[4] if len(fields) > 4 else "",
+            })
+        break
+
+    recent_events = []
+    allowed_events = []
+    blocked_events = []
+    access_log_error = ""
+    journal_error = ""
+    journal_cursor = ""
+    if journalctl_installed:
+        tail_entries, journal_error = _read_dnsmasq_journal(limit=80, since="1 hour ago")
+        try:
+            saved_cursor = DNS_JOURNAL_CURSOR_PATH.read_text(encoding="utf-8").strip()
+        except OSError:
+            saved_cursor = ""
+        if saved_cursor:
+            new_entries, incremental_error = _read_dnsmasq_journal(
+                cursor=saved_cursor, limit=500,
+            )
+            journal_error = journal_error or incremental_error
+        else:
+            new_entries = tail_entries
+
+        for entry in tail_entries:
+            kind = "dhcp" if "dhcp" in entry["message"].casefold() else "dns"
+            recent_events.append({"kind": kind, **entry})
+        classified_tail = _classified_dnsmasq_events(tail_entries)
+        allowed_events = [
+            event for event in classified_tail if event["classification"] == "allowed"
+        ]
+        blocked_events = [
+            event for event in classified_tail if event["classification"] == "blocked"
+        ]
+
+        if new_entries:
+            access_log_error = _append_dns_access_log(
+                _classified_dnsmasq_events(new_entries),
+            )
+            if not access_log_error:
+                journal_cursor = new_entries[-1]["cursor"]
+                access_log_error = _save_dns_journal_cursor(journal_cursor)
+
+    service_active = service_state == "active"
+    return {
+        "installed": dnsmasq_installed,
+        "service_state": service_state or "desconhecido",
+        "dns_enabled": service_active and not port_disabled,
+        "dhcp_enabled": service_active and dhcp_configured,
+        "lease_count": len(leases),
+        "leases": leases,
+        "journal_available": journalctl_installed,
+        "journal_error": journal_error,
+        "access_log_path": str(DNS_ACCESS_LOG_PATH),
+        "access_log_error": access_log_error,
+        "allowed_events": allowed_events,
+        "blocked_events": blocked_events,
+        "recent_events": recent_events,
+    }
+
+
+def collect_cpu_metrics():
+    frequency_mhz = None
+    temperature_c = None
+    try:
+        frequency = psutil.cpu_freq()
+        if frequency and math.isfinite(frequency.current) and frequency.current > 0:
+            frequency_mhz = frequency.current
+    except (AttributeError, OSError, NotImplementedError):
+        pass
+
+    try:
+        sensors = psutil.sensors_temperatures()
+    except (AttributeError, OSError, NotImplementedError):
+        sensors = {}
+
+    candidates = []
+    cpu_sensor_names = ("cpu", "coretemp", "k10temp", "zenpower", "x86_pkg_temp")
+    cpu_labels = ("cpu", "core", "package", "tctl", "tdie", "x86_pkg")
+    for sensor_name, readings in sensors.items():
+        sensor_name = sensor_name.casefold()
+        for reading in readings:
+            label = (reading.label or "").casefold()
+            if not any(name in sensor_name for name in cpu_sensor_names) and not any(
+                name in label for name in cpu_labels
+            ):
+                continue
+            current = reading.current
+            if current is None or not math.isfinite(current):
+                continue
+            priority = int(any(name in label for name in ("package", "tctl", "tdie")))
+            candidates.append((priority, current))
+    if candidates:
+        temperature_c = max(candidates)[1]
+
+    return {
+        "frequency_mhz": frequency_mhz,
+        "temperature_c": temperature_c,
+    }
+
+
 def collect_status(smb_config=None, smartctl_path=None):
     share_paths, share_error = collect_share_paths(smb_config)
     memory = psutil.virtual_memory()
@@ -561,16 +895,21 @@ def collect_status(smb_config=None, smartctl_path=None):
     physical_disks, smartctl_error, smart_sampled_at = collect_cached_physical_disks(smartctl_path)
     filesystems = collect_system_filesystems()
     network = psutil.net_io_counters()
+    cpu_metrics = collect_cpu_metrics()
     return {
         "hostname": platform.node(),
         "os": platform.system(),
         "os_release": platform.release(),
         "system_info": collect_cached_system_info(),
+        "dns_dhcp": collect_dns_dhcp(),
+        "internet": collect_internet_status(),
         "filesystems": filesystems,
         "sampled_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "uptime_seconds": max(0, int(time.time() - psutil.boot_time())),
         "cpu_percent": psutil.cpu_percent(interval=0.5),
         "cpu_count": psutil.cpu_count() or 0,
+        "cpu_frequency_mhz": cpu_metrics["frequency_mhz"],
+        "cpu_temperature_c": cpu_metrics["temperature_c"],
         "memory": {
             "total_bytes": memory.total,
             "used_bytes": memory.used,

@@ -12,6 +12,7 @@ Este projeto reúne o script de configuração de um NAS Debian, um agente que p
 | Serviço systemd | `marcelinoServer.service` | Executa o agente após a inicialização do sistema. |
 | Instalador do agente | `install_marcelinoServer.sh` | Instala o agente, configura o arquivo de ambiente e inicia o serviço. |
 | Cliente Windows | `marcelinoClient.py` | Interface para estatísticas, compartilhamentos, backup/restauração e terminal SSH. |
+| Prévia do cliente | `preview_marcelinoClient.py` | Abre uma aba com dados genéricos locais, sem conexão com servidor. |
 | Instalador do cliente | `install_marcelinoClient.ps1` | Instala dependências, gera o executável e cria atalhos. |
 
 ## Configurar o NAS
@@ -67,6 +68,8 @@ sudo nas-speedtest graph --hours 24  # gráfico das últimas 24 horas
 
 No subcomando `log`, use `-n` para definir a quantidade de testes. A opção global `--log` indica o caminho do arquivo JSON; por isso, `nas-speedtest --log 10 log` procura um arquivo chamado `10` e pode informar que não há testes registrados.
 
+Os gráficos incluem grades major e minor, com estilos distintos para facilitar a leitura.
+
 #### Gerenciar timers
 
 Consulte o estado dos timers e os próximos horários programados:
@@ -102,7 +105,7 @@ Os PNG são nomeados `speedtest_AAAA-MM-DD_<periodo>.png` (por exemplo `speedtes
 ### IP estático, DNS e DHCP
 
 - **IP estático (`--network`):** controlado por `NET_STATIC`, `NAS_IP`, `NAS_PREFIX`, `NET_IFACE` e `NET_GATEWAY`. Interface e gateway vazios são detectados pela rota padrão. Se `LAN_CIDR` estiver vazio, é derivado de `NAS_IP/NAS_PREFIX`.
-- **DNS (`--dns`, `DNS_ENABLE`):** dnsmasq com cache, resolvedores externos em `DNS_UPSTREAM` e domínio local `DNS_DOMAIN`. Clientes DHCP são registrados por nome (`pc1` e `pc1.lan`) e o próprio NAS responde pelo `NAS_IP`. Máquinas com IP fixo precisam de entrada no `/etc/hosts` do NAS ou de `dhcp-host=` em `/etc/dnsmasq.d/nas.conf`. O `systemd-resolved` é desativado e o `/etc/resolv.conf` do NAS aponta para `127.0.0.1`.
+- **DNS (`--dns`, `DNS_ENABLE`):** dnsmasq com cache, resolvedores externos em `DNS_UPSTREAM` e domínio local `DNS_DOMAIN`. Clientes DHCP são registrados por nome (`pc1` e `pc1.lan`) e o próprio NAS responde pelo `NAS_IP`. Máquinas com IP fixo precisam de entrada no `/etc/hosts` do NAS ou de `dhcp-host=` em `/etc/dnsmasq.d/nas.conf`; o script mantém uma cópia filtrada em `/var/lib/nas-dns/hosts`, removendo entradas loopback (`127.x.x.x` e `::1`) antes de servi-las na LAN. Reexecute `sudo bash nas-setup.sh --dns` após alterar `/etc/hosts`. O `systemd-resolved` é desativado e o `/etc/resolv.conf` do NAS aponta para `127.0.0.1`. A configuração ativa `log-queries=extra` e `log-dhcp`; as listas de acessos liberados/bloqueados exibem os últimos eventos da última hora. O agente guarda os eventos classificados em `/var/log/marcelinoServer/dnsmasq-access.jsonl`, com rotação de 5 MB e três cópias, e o journal original pode ser consultado com `journalctl -u dnsmasq`.
 - **Bloqueio de anúncios, rastreadores e malware:** as listas em `DNS_BLOCKLISTS` (padrão: StevenBlack, HaGeZi Pro e HaGeZi TIF medium) são consolidadas em `/var/lib/nas-dns/blocklist.hosts` por `/usr/local/sbin/update-dns-blocklist`, executado na instalação e semanalmente pelo timer `nas-dns-blocklist.timer`. São aceitos os formatos hosts e dnsmasq (`local=/dominio/`).
 - **DHCP (`DHCP_ENABLE`):** faixa `DHCP_RANGE_START`–`DHCP_RANGE_END` com concessão `DHCP_LEASE`; entrega gateway, o NAS como DNS e, com NTP ativo, o NAS como servidor de horário. Desative o DHCP do roteador antes para evitar dois servidores na rede.
 
@@ -130,7 +133,7 @@ sudo bash nas-setup.sh --samba --discovery
 
 ## Serviço de estatísticas
 
-O agente `marcelinoServer.py` coleta CPU, memória, tempo ativo, rede, informações do sistema, sistemas de arquivos montados, discos físicos/SMART e configuração dos compartilhamentos Samba. O JSON padrão chama-se `.marcelinoSrv.json`.
+O agente `marcelinoServer.py` coleta carga, frequência e temperatura da CPU, memória, tempo ativo, rede, informações do sistema, sistemas de arquivos montados, discos físicos/SMART, configuração dos compartilhamentos Samba e estado/atividade DNS e DHCP. Frequência e temperatura são opcionais: aparecem indisponíveis se o hardware ou o sistema não expuserem esses dados. O JSON padrão chama-se `.marcelinoSrv.json`.
 
 O instalador deve ser executado no servidor Linux, depois de instalar/configurar o Samba:
 
@@ -188,6 +191,17 @@ O executável é instalado em `%LOCALAPPDATA%\Programs\MarcelinoClient\Marcelino
 
 O cliente inicia na tela de login. Depois de autenticar no servidor SMB, abre a área principal, onde as abas compartilham a mesma sessão. O cabeçalho mostra usuário e servidor; **Desconectar** encerra a sessão SMB e SSH e retorna ao login.
 
+### Prévia local
+
+Para inspecionar uma aba sem autenticar ou conectar a um servidor, execute `preview_marcelinoClient.py` no ambiente Python do projeto e informe a tela desejada:
+
+```powershell
+.\.venv\Scripts\python.exe preview_marcelinoClient.py --screen Sistema
+.\.venv\Scripts\python.exe preview_marcelinoClient.py --screen "DNS / DHCP"
+```
+
+As opções de `--screen` são `Sistema`, `Discos`, `Internet`, `DNS / DHCP`, `Compartilhamentos`, `Backup` e `Terminal`. O preview usa dados genéricos locais; Backup e Terminal também mostram exemplos sem iniciar transferências nem conexão SSH.
+
 ### Login
 
 Selecione um servidor da lista, informe usuário e senha Samba e escolha **Validar e conectar**. **Procurar na rede** procura servidores SMB na rede local e atualiza as opções disponíveis.
@@ -196,7 +210,7 @@ Selecione um servidor da lista, informe usuário e senha Samba e escolha **Valid
 
 ### Sistema
 
-Mostra CPU e memória, tempo ativo, tráfego de rede e identificação de sistema/hardware. O intervalo pode ser escolhido entre 1 e 300 segundos; a escolha é salva e restaurada na próxima abertura. **Atualizar agora** solicita uma nova leitura.
+Mostra carga, frequência e temperatura da CPU, uso de memória, tempo ativo, tráfego de rede e identificação de sistema/hardware. Frequência e temperatura aparecem como `n/d` quando indisponíveis; uptime e tráfego de rede são apresentados em painéis compactos. O intervalo pode ser escolhido entre 1 e 300 segundos; a escolha é salva e restaurada na próxima abertura. **Atualizar agora** solicita uma nova leitura.
 
 ![Painel de sistema](assets/02_tela_sistema.png)
 
@@ -206,25 +220,41 @@ Apresenta barras de uso dos sistemas de arquivos montados e uma tabela dos disco
 
 ![Sistemas de arquivos e discos SMART](assets/03_tela_discos.png)
 
+### Internet
+
+Mostra o IP local e remoto, além de testes de velocidade de download, upload e ping. Os resultados são apresentados em uma tabela com timestamp, taxa de download, taxa de upload, ping e servidor utilizado para o teste.
+
+![Teste de velocidade de internet](assets/04_tela_internet.png)
+
+### DNS / DHCP
+
+Exibe o estado do serviço DNS/DHCP, incluindo se está ativo, se o DNS e o DHCP estão habilitados, a contagem de leases e os eventos permitidos e bloqueados. Mostra também os leases atuais com IP, hostname, MAC e tempo de expiração.
+
+![Configurações de DNS e DHCP](assets/05_tela_dns_dhcp.png)
+
 ### Compartilhamentos
 
 Lista os shares publicados pelo Samba, caminho e regras configuradas: usuários/grupos permitidos, listas de leitura e escrita, administradores, bloqueados, acesso de convidados e modo somente leitura. O agente extrai essas diretivas do `smb.conf` e as publica no JSON de estatísticas; grupos são exibidos como configurados, por exemplo `@nasgroup`.
 
-![Compartilhamentos Samba e regras de acesso](assets/04_tela_compartilhamentos.png)
+![Compartilhamentos Samba e regras de acesso](assets/06_tela_compartilhamentos.png)
 
 ### Backup
 
 Navegue pelos compartilhamentos acessíveis para escolher o destino, adicione pastas locais de origem, inicie o backup e acompanhe o progresso e o log. Arquivos que já estão atualizados no destino são ignorados; o botão **Cancelar** interrompe a operação.
 
-![Tela de backup](assets/05_tela_backup.png)
+![Tela de backup](assets/07_tela_backup.png)
 
 ### Terminal
 
 Conecta por SSH ao servidor e usuário da sessão autenticada. Permite usar senha SMB como autenticação e selecionar um arquivo de chave privada, com passphrase opcional. A primeira conexão com um host desconhecido pede confirmação digitando `yes` e salva a chave em `~/.ssh/known_hosts`. O terminal emula ANSI e aceita entrada interativa para comandos e aplicações TUI, como `btop`.
 
-![Terminal SSH](assets/06_tela_terminal.png)
+![Terminal SSH](assets/08_tela_terminal.png)
 
-![Terminal SSH](assets/07_tela_sshconectado.png)
+### SSH Conectado
+
+Mostra o estado da conexão SSH ativa com o servidor, incluindo o usuário conectado e o host. Permite interagir com o servidor através de um terminal SSH em tempo real.
+
+![Terminal SSH](assets/09_tela_sshconectado.png)
 
 ## Fluxo de dados
 

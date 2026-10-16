@@ -187,7 +187,9 @@ def cmd_graph(args):
     ax.set_title(f"Velocidade da internet - {times[0]:%d/%m/%Y %H:%M} a {times[-1]:%d/%m/%Y %H:%M}")
     ax.xaxis.set_major_formatter(mdates.DateFormatter("%d/%m %H:%M", tz=times[0].tzinfo))
     fig.autofmt_xdate()
-    ax.grid(True, alpha=0.3)
+    ax.minorticks_on()
+    ax.grid(True, which="major", alpha=0.75)
+    ax.grid(True, which="minor", linestyle=":", linewidth=0.5, alpha=0.50)
     ax.legend()
     fig.tight_layout()
 

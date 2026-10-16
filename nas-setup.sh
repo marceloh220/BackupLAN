@@ -571,9 +571,13 @@ setup_dns() {
     echo "domain-needed"
     echo "bogus-priv"
     echo "no-resolv"
+    echo "no-hosts"
+    echo "addn-hosts=/var/lib/nas-dns/hosts"
     echo "domain=$DNS_DOMAIN"
     echo "local=/$DNS_DOMAIN/"
     echo "expand-hosts"
+    echo "log-queries=extra"
+    echo "log-dhcp"
     # Evita que o /etc/hosts (127.0.1.1) seja entregue aos clientes como endereço do NAS
     echo "host-record=$(hostname),$(hostname).$DNS_DOMAIN,$NAS_IP"
     local s
@@ -594,6 +598,7 @@ setup_dns() {
   } > /etc/dnsmasq.d/nas.conf
 
   mkdir -p /var/lib/nas-dns
+  awk '$1 !~ /^127\./ && $1 != "::1" { print }' /etc/hosts > /var/lib/nas-dns/hosts
   touch /var/lib/nas-dns/blocklist.hosts
   if [[ "$DNS_ENABLE" == "yes" ]]; then
     update_blocklist_script

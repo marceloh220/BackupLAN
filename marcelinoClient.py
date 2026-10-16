@@ -829,6 +829,8 @@ class App(ctk.CTk):
         self.tab_container.pack(fill="both", expand=True)
         self.add_tab("Sistema", "▦", self._build_system_page)
         self.add_tab("Discos", "◉", self._build_disks_page)
+        self.add_tab("Internet", "🌐", self._build_internet_page)
+        self.add_tab("DNS / DHCP", "↔", self._build_dns_dhcp_page)
         self.add_tab("Compartilhamentos", "▤", self._build_shares_page)
         self.add_tab("Backup", "⤓", self._build_backup_page)
         self.add_tab("Terminal", ">_", self._build_terminal_page)
@@ -1492,19 +1494,46 @@ class App(ctk.CTk):
             "memory": MetricRing(metrics, "▤ Memória", THEME_PALETTE["panel"]),
         }
         self.metric_rings["cpu"].grid(row=0, column=0, sticky="nsew", padx=3, pady=3)
-        self.metric_rings["memory"].grid(row=0, column=1, sticky="nsew", padx=3, pady=3)
+        self.cpu_details_panel = self._section(metrics, "CPU")
+        self.cpu_details_panel.grid(row=0, column=1, sticky="nsew", padx=3, pady=3)
+        self.cpu_vars = {
+            "frequency": tk.StringVar(value="n/d"),
+            "temperature": tk.StringVar(value="n/d"),
+        }
+        for row, (title, key) in enumerate((
+            ("⚡ Frequência", "frequency"),
+            ("🌡 Temperatura", "temperature"),
+        )):
+            detail_row = ctk.CTkFrame(self.cpu_details_panel, fg_color="transparent")
+            detail_row.pack(fill="x", padx=10, pady=4)
+            ctk.CTkLabel(detail_row, text=title, anchor="w").pack(side="left")
+            VariableLabel(
+                detail_row, self.cpu_vars[key], anchor="w",
+                font=ctk.CTkFont(size=12, weight="bold"),
+            ).pack(side="left", padx=(6, 0))
+        self.metric_rings["memory"].grid(row=0, column=2, sticky="nsew", padx=3, pady=3)
         self.metric_vars = {
             "uptime": tk.StringVar(value="--"),
             "network": tk.StringVar(value="--"),
         }
-        for column, (title, key) in enumerate((("◷ Tempo ativo", "uptime"), ("↔ Rede", "network")), start=2):
+        for column, (title, key) in enumerate((
+            ("◷ Tempo ativo", "uptime"),
+            ("↔ Rede", "network"),
+        ), start=3):
             panel = self._section(metrics, title)
+            panel.configure(width=132 if key == "uptime" else 154)
+            panel.grid_propagate(False)
             panel.grid(row=0, column=column, sticky="nsew", padx=3, pady=3)
-            VariableLabel(panel, self.metric_vars[key], anchor="center").pack(
-                fill="both", expand=True, padx=8, pady=(8, 10),
+            VariableLabel(
+                panel, self.metric_vars[key], anchor="nw",
+                font=ctk.CTkFont(size=12, weight="bold"),
+            ).pack(
+                fill="both", expand=True, padx=10, pady=(4, 6),
             )
-        for column in range(4):
-            metrics.columnconfigure(column, weight=1)
+        for column in range(3):
+            metrics.columnconfigure(column, weight=0, minsize=176)
+        metrics.columnconfigure(3, weight=0, minsize=132)
+        metrics.columnconfigure(4, weight=0, minsize=154)
 
         identity = self._section(content, "Sistema e hardware")
         identity.pack(fill="x", padx=2, pady=(6, 4))
@@ -1525,14 +1554,23 @@ class App(ctk.CTk):
         for index, (label, key) in enumerate(system_fields):
             row, pair = divmod(index, 2)
             column = pair * 2
-            ctk.CTkLabel(identity_grid, text=label, anchor="w", width=170).grid(
-                row=row, column=column, sticky="nw", padx=(4, 8), pady=4,
+            # normaliza o espaçamento e largura das labels de acordo com a coluna {
+            if column == 0:
+                padx = (4, 8)
+                width = 170
+            else:
+                padx = (75, 8)
+                width = 120
+            # }
+            ctk.CTkLabel(identity_grid, text=label, anchor="w", width=width).grid(
+                row=row, column=column, sticky="nw", padx=padx, pady=4,
             )
             VariableLabel(
                 identity_grid, self.system_info_vars[key], anchor="w", wraplength=300,
-            ).grid(row=row, column=column + 1, sticky="new", padx=(0, 12), pady=4)
-        identity_grid.columnconfigure(1, weight=1)
-        identity_grid.columnconfigure(3, weight=1)
+            ).grid(row=row, column=column + 1, sticky="new", padx=(0, 4), pady=4)
+        identity_grid.columnconfigure(1, weight=0)
+        identity_grid.columnconfigure(2, weight=0)
+        identity_grid.columnconfigure(3, weight=0)
 
     def _build_disks_page(self, page):
         content = ctk.CTkScrollableFrame(
@@ -1603,6 +1641,93 @@ class App(ctk.CTk):
         self.physical_disk_empty_label = None
         self.storage_status = tk.StringVar(value="Aguardando métricas de armazenamento.")
         VariableLabel(storage, self.storage_status).pack(anchor="w", padx=8, pady=(4, 2))
+
+    def _build_dns_dhcp_page(self, page):
+        content = ctk.CTkScrollableFrame(page, fg_color=THEME_PALETTE["background"])
+        content.pack(fill="both", expand=True, padx=8, pady=4)
+        status_panel = self._section(content, "◉ Estado do serviço")
+        status_panel.pack(fill="x", padx=2, pady=(0, 4))
+        self.dns_dhcp_status = tk.StringVar(value="Aguardando dados do servidor.")
+        VariableLabel(status_panel, self.dns_dhcp_status).pack(
+            anchor="w", padx=12, pady=(2, 8),
+        )
+
+        leases_panel = self._section(content, "▤ Concessões DHCP ativas")
+        leases_panel.pack(fill="x", padx=2, pady=4)
+        self.dhcp_leases_header = ctk.CTkFrame(
+            leases_panel, fg_color="transparent",
+        )
+        self.dhcp_leases_header.pack(fill="x", padx=8, pady=(2, 0))
+        self.dhcp_leases_rows = ctk.CTkScrollableFrame(
+            leases_panel, height=150, fg_color="transparent", corner_radius=0,
+        )
+        self.dhcp_leases_rows.pack(fill="x", padx=8, pady=(0, 8))
+        self.dhcp_lease_columns = ((1, 150), (2, 180), (1, 170), (2, 210))
+        for column, (weight, minsize) in enumerate(self.dhcp_lease_columns):
+            self.dhcp_leases_header.grid_columnconfigure(
+                column, weight=weight, minsize=minsize,
+            )
+            self.dhcp_leases_rows.grid_columnconfigure(
+                column, weight=weight, minsize=minsize,
+            )
+        for column, title in enumerate(("IP", "Hostname", "MAC", "Expira (UTC)")):
+            ctk.CTkLabel(
+                self.dhcp_leases_header,
+                text=title,
+                anchor="w",
+                text_color=THEME_PALETTE["muted"],
+            ).grid(row=0, column=column, sticky="ew", padx=(4, 12), pady=(0, 4))
+        self.dhcp_lease_rendered = None
+
+        events_grid = ctk.CTkFrame(content, fg_color="transparent")
+        events_grid.pack(fill="both", expand=True, padx=2, pady=4)
+        events_grid.grid_columnconfigure(0, weight=1)
+        events_grid.grid_columnconfigure(1, weight=1)
+        allowed_panel = self._section(events_grid, "✓ Acessos liberados")
+        allowed_panel.grid(row=0, column=0, sticky="nsew", padx=(0, 3))
+        self.dns_allowed_text = ctk.CTkTextbox(
+            allowed_panel, height=240, wrap="word", state="disabled",
+        )
+        self.dns_allowed_text.pack(fill="both", expand=True, padx=8, pady=(2, 8))
+        blocked_panel = self._section(events_grid, "⊘ Acessos bloqueados")
+        blocked_panel.grid(row=0, column=1, sticky="nsew", padx=(3, 0))
+        self.dns_blocked_text = ctk.CTkTextbox(
+            blocked_panel, height=240, wrap="word", state="disabled",
+        )
+        self.dns_blocked_text.pack(fill="both", expand=True, padx=8, pady=(2, 8))
+
+    def _build_internet_page(self, page):
+        content = ctk.CTkScrollableFrame(page, fg_color=THEME_PALETTE["background"])
+        content.pack(fill="both", expand=True, padx=8, pady=4)
+        addresses = self._section(content, "🌐 Endereços IP")
+        addresses.pack(fill="x", padx=2, pady=(0, 6))
+        address_grid = ctk.CTkFrame(addresses, fg_color="transparent")
+        address_grid.pack(fill="x", padx=8, pady=(0, 8))
+        self.internet_local_ip = tk.StringVar(value="Indisponível")
+        self.internet_remote_ip = tk.StringVar(value="Indisponível")
+        for column, (label, variable) in enumerate((
+            ("⌂ IP local (NAS)", self.internet_local_ip),
+            ("↗ IP remoto (público)", self.internet_remote_ip),
+        )):
+            ctk.CTkLabel(address_grid, text=label, anchor="w").grid(
+                row=0, column=column * 2, sticky="w", padx=(4, 8), pady=4,
+            )
+            ctk.CTkEntry(
+                address_grid, textvariable=variable, state="disabled",
+                fg_color=THEME_PALETTE["input"],
+            ).grid(row=0, column=column * 2 + 1, sticky="ew", padx=(0, 16), pady=4)
+            address_grid.columnconfigure(column * 2 + 1, weight=1)
+
+        history = self._section(content, "⚡ Testes de velocidade recentes")
+        history.pack(fill="both", expand=True, padx=2, pady=4)
+        self.internet_status = tk.StringVar(value="Aguardando dados do servidor.")
+        VariableLabel(history, self.internet_status).pack(
+            anchor="w", padx=12, pady=(2, 6),
+        )
+        self.internet_tests_text = ctk.CTkTextbox(
+            history, height=340, wrap="none", state="disabled",
+        )
+        self.internet_tests_text.pack(fill="both", expand=True, padx=8, pady=(0, 8))
 
     def _build_shares_page(self, page):
         self.samba_share_panel = self._section(page, "Compartilhamentos Samba")
@@ -1866,6 +1991,8 @@ class App(ctk.CTk):
         self.storage_status.set(message)
         for value in self.metric_vars.values():
             value.set("--")
+        for value in self.cpu_vars.values():
+            value.set("n/d")
         for value in self.system_info_vars.values():
             value.set("Indisponível")
         for ring in self.metric_rings.values():
@@ -1873,6 +2000,26 @@ class App(ctk.CTk):
         self._render_system_filesystems([])
         self._render_samba_shares([])
         self._render_physical_disks([])
+        self.dns_dhcp_status.set(message)
+        self.dhcp_lease_rendered = None
+        self._render_dhcp_leases([])
+        self._set_textbox_content(self.dns_allowed_text, "")
+        self._set_textbox_content(self.dns_blocked_text, "")
+        self.internet_local_ip.set("Indisponível")
+        self.internet_remote_ip.set("Indisponível")
+        self.internet_status.set(message)
+        self.__dict__.setdefault("_render_cache", {}).pop("internet", None)
+        self._set_textbox_content(self.internet_tests_text, message)
+
+    @staticmethod
+    def _set_textbox_content(textbox, content):
+        if textbox.get("1.0", "end-1c") == content:
+            return
+        textbox.configure(state="normal")
+        textbox.delete("1.0", "end")
+        if content:
+            textbox.insert("end", content)
+        textbox.configure(state="disabled")
 
     def _unchanged(self, key, data):
         # Evita reconstruir/relayout de widgets quando os dados são idênticos aos da última renderização.
@@ -2258,6 +2405,21 @@ class App(ctk.CTk):
             self.metric_rings["cpu"].set_value(
                 cpu_percent, f"{cpu_count} núcleos", self.theme_colors,
             )
+            frequency_mhz = data.get("cpu_frequency_mhz")
+            if isinstance(frequency_mhz, (int, float)) and frequency_mhz > 0:
+                frequency_text = (
+                    f"{frequency_mhz / 1000:.2f} GHz"
+                    if frequency_mhz >= 1000 else f"{frequency_mhz:.0f} MHz"
+                )
+            else:
+                frequency_text = "n/d"
+            temperature_c = data.get("cpu_temperature_c")
+            temperature_text = (
+                f"{temperature_c:.1f} °C"
+                if isinstance(temperature_c, (int, float)) else "n/d"
+            )
+            self.cpu_vars["frequency"].set(frequency_text)
+            self.cpu_vars["temperature"].set(temperature_text)
             self.metric_rings["memory"].set_value(
                 memory["percent"],
                 f"{self._format_bytes(memory['used_bytes'])} de "
@@ -2266,8 +2428,8 @@ class App(ctk.CTk):
             )
             self.metric_vars["uptime"].set(self._format_duration(data["uptime_seconds"]))
             self.metric_vars["network"].set(
-                f"Recebido {self._format_bytes(network['bytes_received'])} · "
-                f"Enviado {self._format_bytes(network['bytes_sent'])}",
+                f"↓ {self._format_bytes(network['bytes_received'])}\n"
+                f"↑ {self._format_bytes(network['bytes_sent'])}",
             )
             overview = (
                 f"{data['hostname']} · {system_values['os_name']} · "
@@ -2278,6 +2440,8 @@ class App(ctk.CTk):
             self._render_system_filesystems(data.get("filesystems", []))
             self._render_samba_shares(data.get("samba_shares"))
             self._render_physical_disks(data["physical_disks"])
+            self._render_dns_dhcp(data.get("dns_dhcp", {}))
+            self._render_internet_status(data.get("internet", {}))
             status_notes = []
             if data.get("share_discovery_error"):
                 status_notes.append(data["share_discovery_error"])
@@ -2286,6 +2450,100 @@ class App(ctk.CTk):
             self.storage_status.set(" · ".join(status_notes) or "SMART consultado pelo agente do servidor.")
         except (KeyError, TypeError, ValueError) as exc:
             self._reset_server_dashboard(f"Arquivo de status inválido: {exc}")
+
+    def _render_dns_dhcp(self, data):
+        service_state = data.get("service_state", "desconhecido")
+        dns_state = "ativo" if data.get("dns_enabled") else "inativo"
+        dhcp_state = "ativo" if data.get("dhcp_enabled") else "inativo"
+        lease_count = data.get("lease_count", 0)
+        log_error = data.get("access_log_error") or data.get("journal_error")
+        log_status = f" · Erro no log: {log_error}" if log_error else (
+            f" · log: {data.get('access_log_path', 'indisponível')}"
+        )
+        self.dns_dhcp_status.set(
+            f"dnsmasq: {service_state} · DNS: {dns_state} · DHCP: {dhcp_state} · "
+            f"concessões: {lease_count}{log_status}"
+        )
+
+        self._render_dhcp_leases(data.get("leases", []))
+
+        for key, textbox in (
+            ("allowed_events", self.dns_allowed_text),
+            ("blocked_events", self.dns_blocked_text),
+        ):
+            events = data.get(key, [])
+            event_lines = [
+                f"{event.get('timestamp', '')} [{event.get('kind', 'dns').upper()}] "
+                f"{event.get('message', '')}".strip()
+                for event in events
+            ]
+            if not event_lines:
+                event_lines.append("Nenhum evento nesta categoria na última hora.")
+            self._set_textbox_content(textbox, "\n".join(event_lines))
+
+    def _render_internet_status(self, data):
+        if self._unchanged("internet", data):
+            return
+        self.internet_local_ip.set(data.get("local_ip") or "Indisponível")
+        self.internet_remote_ip.set(data.get("remote_ip") or "Indisponível")
+        tests = data.get("tests") or []
+        lines = []
+        for entry in reversed(tests):
+            timestamp = str(entry.get("timestamp", "")).replace("T", " ")
+            if entry.get("error"):
+                lines.append(f"{timestamp}  ERRO: {entry['error']}")
+                continue
+            try:
+                download = float(entry["download_mbps"])
+                upload = float(entry["upload_mbps"])
+                ping = entry.get("ping_ms")
+                ping_text = f"{float(ping):.1f} ms" if ping is not None else "n/d"
+            except (KeyError, TypeError, ValueError):
+                lines.append(f"{timestamp}  Registro inválido")
+                continue
+            server = entry.get("server") or "servidor desconhecido"
+            lines.append(
+                f"{timestamp}  Download {download:.2f} Mbit/s  |  "
+                f"Upload {upload:.2f} Mbit/s  |  Ping {ping_text}  |  {server}"
+            )
+        if not lines:
+            lines.append("Nenhum teste de velocidade registrado.")
+        status = data.get("log_error")
+        if status:
+            self.internet_status.set(f"Não foi possível ler o log: {status}")
+        else:
+            self.internet_status.set(f"Exibindo {len(tests)} teste(s) mais recente(s).")
+        self._set_textbox_content(self.internet_tests_text, "\n".join(lines))
+
+    def _render_dhcp_leases(self, leases):
+        signature = json.dumps(leases, sort_keys=True, ensure_ascii=False, default=str)
+        if signature == self.dhcp_lease_rendered:
+            return
+        self.dhcp_lease_rendered = signature
+        for widget in self.dhcp_leases_rows.winfo_children():
+            widget.destroy()
+        if not leases:
+            ctk.CTkLabel(
+                self.dhcp_leases_rows,
+                text="Nenhuma concessão DHCP encontrada.",
+                anchor="w",
+                text_color=THEME_PALETTE["muted"],
+            ).grid(row=0, column=0, columnspan=4, sticky="ew", padx=4, pady=6)
+            return
+
+        for row, lease in enumerate(leases):
+            values = (
+                lease.get("ip") or "?",
+                lease.get("hostname") or "(sem nome)",
+                lease.get("mac") or "?",
+                lease.get("expires_at") or "sem expiração",
+            )
+            for column, value in enumerate(values):
+                ctk.CTkLabel(
+                    self.dhcp_leases_rows,
+                    text=value,
+                    anchor="w",
+                ).grid(row=row, column=column, sticky="ew", padx=(4, 12), pady=3)
 
     @staticmethod
     def _format_bytes(value):
