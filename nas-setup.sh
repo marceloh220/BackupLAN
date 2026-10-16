@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Configura um NAS (RAID + LUKS opcional + Samba + descoberta + firewall) em Debian limpo.
+# Configura um NAS ( Network Attached Storage) com RAID, criptografia, Samba, DNS/DHCP e firewall.
 # Uso: sudo ./nas-setup.sh
 set -euo pipefail
 

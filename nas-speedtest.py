@@ -1,14 +1,44 @@
 #!/usr/bin/env python3
-"""Mede a velocidade da internet, registra em log e gera gráficos PNG.
+"""
+    file: nas-speedtest.py
+    Description: Mede a velocidade da internet, registra em log e gera gráficos PNG.
+    Uso:
+    nas-speedtest test                    executa um teste novo e grava no log
+    nas-speedtest log [-n 10]             mostra os n últimos testes
+        nas-speedtest --log ARQUIVO log -n 10 usa outro arquivo e mostra os 10 últimos testes
+    nas-speedtest graph [-n 24]           gráfico dos n últimos testes
+    nas-speedtest graph --hours 24        gráfico das últimas 24 horas
 
-Uso:
-  nas-speedtest test                    executa um teste novo e grava no log
-  nas-speedtest log [-n 10]             mostra os n últimos testes
-    nas-speedtest --log ARQUIVO log -n 10 usa outro arquivo e mostra os 10 últimos testes
-  nas-speedtest graph [-n 24]           gráfico dos n últimos testes
-  nas-speedtest graph --hours 24        gráfico das últimas 24 horas
+    --log define o caminho do arquivo JSON; -n define quantos testes listar.
 
---log define o caminho do arquivo JSON; -n define quantos testes listar.
+    Observation: Designado para rodar no lado do servidor linux
+            instalar funcionalidades com: sudo nas-setup.sh --speedtest
+            ou para instalação completa de uma instalação limpa do Debian: sudo nas-setup.sh --all
+
+    date: 2026-06-15
+
+    MIT License
+
+    Copyright (c) 2026 Marcelo H Moraes
+
+    Permission is hereby granted, free of charge, to any person obtaining a copy
+    of this software and associated documentation files (the "Software"), to deal
+    in the Software without restriction, including without limitation the rights
+    to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+    copies of the Software, and to permit persons to whom the Software is
+    furnished to do so, subject to the following conditions:
+
+    The above copyright notice and this permission notice shall be included in all
+    copies or substantial portions of the Software.
+
+    THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+    IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+    FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+    AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+    LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+    OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+    SOFTWARE.
+
 """
 import argparse
 import json
@@ -138,6 +168,8 @@ def cmd_log(args):
 
 
 def match_owner(path, reference):
+    if sys.platform != "linux":
+        return
     st = os.stat(reference)
     try:
         os.chown(path, st.st_uid, st.st_gid)
@@ -163,6 +195,8 @@ def cmd_graph(args):
     matplotlib.use("Agg")
     import matplotlib.dates as mdates
     import matplotlib.pyplot as plt
+
+    ref = now()
 
     entries = [e for e in read_log(args.log) if "error" not in e]
     if args.hours:
@@ -203,8 +237,9 @@ def cmd_graph(args):
 
 
 def main():
-    if not sys.platform.startswith("linux"):
+    if sys.platform != "linux":
         sys.exit(f"Aviso: nas-speedtest só é suportado em Linux (sistema atual: {sys.platform}).")
+        return
     parser = argparse.ArgumentParser(description="Teste de velocidade da internet do NAS")
     parser.add_argument("--log", default=DEFAULT_LOG,
                         help="caminho do arquivo de log (JSON por linha)")
