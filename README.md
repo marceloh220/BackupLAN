@@ -11,6 +11,7 @@ Este projeto reúne o script de configuração de um NAS Debian, um agente que p
 | Agente de estatísticas | `marcelinoServer.py` | Publica métricas do servidor e regras de compartilhamento Samba em JSON. |
 | Serviço systemd | `marcelinoServer.service` | Executa o agente após a inicialização do sistema. |
 | Instalador do agente | `install_marcelinoServer.sh` | Instala o agente, configura o arquivo de ambiente e inicia o serviço. |
+| Dashboard web | `marcelinoWeb.py`, `marcelinoWeb.service` | Servidor web com login que exibe as métricas publicadas pelo agente, acessível pela rede local. |
 | Cliente Windows | `marcelinoClient.py` | Interface para estatísticas, compartilhamentos, backup/restauração e terminal SSH. |
 | Prévia do cliente | `preview_marcelinoClient.py` | Abre uma aba com dados genéricos locais, sem conexão com servidor. |
 | Instalador do cliente | `install_marcelinoClient.ps1` | Instala dependências, gera o executável e cria atalhos. |
@@ -31,21 +32,24 @@ As etapas podem ser executadas separadamente ou combinadas:
 | `--network` | Configura o IP estático `NAS_IP`/`NAS_PREFIX` na interface (NetworkManager ou `/etc/network/interfaces`, com backup em `interfaces.orig`). A conexão SSH atual pode cair; reconecte no novo IP. |
 | `--raid` | Cria o RAID com `mdadm` e atualiza a configuração de boot. |
 | `--storage` | Formata e monta o volume; pode configurar criptografia LUKS e desbloqueio automático. |
+| `--user` | Cria o usuário principal (`USER_NAME`, senha `USER_PASSWORD`) no sistema e no Samba; também é executado pelas etapas Samba, dashboard e teste de velocidade. |
 | `--samba` | Cria usuário/grupo, diretórios, permissões e shares; valida a configuração com `testparm` e reinicia Samba. |
 | `--discovery` | Ativa anúncio SMB por Avahi/mDNS e WS-Discovery quando disponível. |
 | `--ntp` | Configura o chrony como servidor de horário da LAN quando `NTP_ENABLE=yes`. |
 | `--dns` | Configura o dnsmasq como DNS e DHCP da LAN (veja abaixo). |
 | `--speedtest` | Instala `nas-speedtest` (a partir de `nas-speedtest.py`) e os timers de teste e gráfico (veja abaixo). |
-| `--firewall` | Configura UFW para SSH, Samba, descoberta, DNS (53), DHCP (67/udp) e, se habilitado, NTP. A configuração redefine as regras atuais do UFW. |
-| `--all` | Executa as etapas na ordem recomendada: instalação, rede, RAID, armazenamento, Samba, descoberta, NTP, DNS/DHCP e firewall. |
+| `--web` | Instala o dashboard web com login (veja abaixo). |
+| `--firewall` | Configura UFW para SSH, Samba, descoberta, DNS (53), DHCP (67/udp) e, se habilitado, NTP e a porta do dashboard (`WEB_PORT`). A configuração redefine as regras atuais do UFW. |
+| `--all` | Executa as etapas na ordem recomendada: instalação, rede, RAID, armazenamento, Samba, descoberta, NTP, DNS/DHCP, teste de velocidade, dashboard web e firewall. |
 
 As opções são editadas na seção **CONFIGURAÇÃO** no começo do script. Os valores fornecidos incluem:
 
 - RAID espelhado nível 1 com `/dev/sdb` e `/dev/sdc`, criado como `/dev/md0`.
 - Sistema de arquivos configurável em `RAID_FILESYSTEM`: `ext4` (padrão), `xfs` ou `btrfs`.
 - Volume em `/srv/nas`; LUKS habilitado sobre `/dev/md0`, com mapeamento `nas_crypt`, keyfile `/etc/nas.key` e desbloqueio automático.
-- Shares `Publico`, `Privado`, `Backup`, `Midia` e `Marcelo`.
-- `Publico` permite convidados; `Backup` e `Midia` usam o grupo `nasgroup`; `Privado` e `Marcelo` são restritos ao usuário `marcelo`.
+- Shares `Publico`, `Privado`, `Backup`, `Midia`, `Monitor` e o share do usuário principal (`USER_NAME` com a primeira letra maiúscula).
+- `Publico` permite convidados; `Backup` e `Midia` usam o grupo `nasgroup`; `Privado` e o share do usuário são restritos a `USER_NAME`.
+- Usuário principal: `USER_NAME` e `USER_PASSWORD` (troque o valor `sua_senha_aqui`; mínimo 8 caracteres). A senha fica em texto puro no script; restrinja o acesso ao arquivo.
 - Grupo de trabalho `WORKGROUP`, domínio `lan` (`LOCAL_DOMAIN`), SSH na porta 22 e chrony habilitado.
 - Rede: `IP_INET`, `IP_GATEWAY`, `IP_RANGE_START`, `IP_RANGE_END`, `DNS_UPSTREAM` e `LOCAL_DOMAIN` ficam no topo do script e alimentam `NAS_IP`, `NET_GATEWAY`, a faixa DHCP e o domínio. Ajuste-os para a sua rede (o NAS, o gateway e a faixa DHCP devem estar na mesma sub-rede).
 
@@ -175,6 +179,45 @@ sudo journalctl -u marcelinoServer.service -f
 ```
 
 O serviço é executado como `root`, aguarda a rede e `smbd` e publica o arquivo atomicamente. Com `Restart=on-failure` e `RestartSec=5`, o systemd tenta reiniciar o agente cinco segundos após uma falha. O acesso ao arquivo também depende das permissões do diretório/share Samba.
+
+## Dashboard web
+
+O `marcelinoWeb.py` (somente biblioteca padrão do Python) lê o JSON publicado pelo `marcelinoServer` e o exibe em uma página com atualização a cada 5 s: sistema, CPU e memória, rede e internet, armazenamento, discos SMART, shares Samba, DNS/DHCP, leases e consultas bloqueadas. O acesso exige login.
+
+Instalação (`marcelinoWeb.py` e `marcelinoWeb.service` devem estar na pasta do `nas-setup.sh`):
+
+```bash
+sudo bash nas-setup.sh --web --firewall
+```
+
+Variáveis `WEB_*` no topo do `nas-setup.sh`:
+
+| Variável | Finalidade |
+|---|---|
+| `WEB_ENABLE` | `yes` instala o dashboard. |
+| `WEB_PORT` | Porta do serviço (portas abaixo de 1024 funcionam via `CAP_NET_BIND_SERVICE`). |
+| `WEB_STATUS` | JSON do `marcelinoServer` (padrão `/srv/nas/monitor/.marcelinoSrv.json`). |
+| `WEB_USER` | Usuário de sistema sem privilégios que executa o serviço. |
+| `WEB_ADMIN` | Usuário web inicial; padrão `USER_NAME`, com a senha `USER_PASSWORD`. Vazio = cadastre depois. |
+| `WEB_TLS` | `yes` gera certificado autoassinado e serve HTTPS; o navegador mostra um aviso na primeira visita. |
+
+Com `WEB_TLS=yes` a porta serve apenas HTTPS; acesse `https://IP_DO_NAS:PORTA` (por exemplo `https://192.168.100.1:80`). O firewall libera a porta somente para `LAN_CIDR`, mas apenas na etapa `--firewall`.
+
+### Usuários
+
+```bash
+sudo marcelinoWeb useradd NOME   # senha mínima de 8 caracteres
+sudo marcelinoWeb passwd NOME
+sudo marcelinoWeb userdel NOME
+sudo marcelinoWeb users
+```
+
+Os usuários ficam em `/etc/marcelinoWeb/users.json` (modo 600, senhas com PBKDF2-SHA256). As sessões duram 8 h em cookie `HttpOnly`/`SameSite=Strict`, e 5 falhas de login seguidas bloqueiam o IP por 5 min. Configuração do serviço em `/etc/default/marcelinoWeb`.
+
+```bash
+sudo systemctl status marcelinoWeb.service
+sudo journalctl -u marcelinoWeb.service -n 50 --no-pager
+```
 
 ## Instalar o cliente Windows
 

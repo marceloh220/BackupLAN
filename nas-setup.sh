@@ -15,6 +15,11 @@ IP_RANGE_END="192.168.0.200"       # fim do intervalo DHCP
 DNS_UPSTREAM=("1.1.1.1" "9.9.9.9") # resolvedores externos (Cloudflare e Quad9)
 LOCAL_DOMAIN="lan"                 # domínio local usado para configuração de rede e Samba
 
+# --- Usuário principal do NAS ---
+USER_NAME="meneceu"                # usuário principal do NAS
+USER_PASSWORD="sua_senha_aqui"     # senha do usuário principal do NAS
+USER_HOME="/srv/nas/$USER_NAME"    # diretório home do usuário principal do NAS (o share Samba usa o nome com a primeira letra maiúscula)
+
 # --- Sistema ---
 SBIN_DIR="/sbin"                    # diretório dos executáveis administrativos
 
@@ -46,14 +51,14 @@ SHARES=(
   "Privado:/srv/nas/privado"
   "Backup:/srv/nas/backup"
   "Midia:/srv/nas/midia"
-  "Marcelo:/srv/marcelo"
+  "${USER_NAME^}:$USER_HOME"
   "Monitor:/srv/nas/monitor"
 )
 PUBLIC_SHARES=("Publico")                          # nomes de shares acessíveis sem senha (guest)
 GROUP_SHARES=("Backup" "Midia")                    # shares acessíveis ao grupo SAMBA_GROUP
 READONLY_SHARES=("Monitor")                        # shares visíveis, somente leitura (gravados localmente pelo marcelinoServer)
-USER_SHARES=("Marcelo:marcelo" "Privado:marcelo")  # pares share:usuario acessíveis somente por esse usuário
-SAMBA_USER="marcelo"                               # usuário Samba (criado se não existir)
+USER_SHARES=("${USER_NAME^}:$USER_NAME" "Privado:$USER_NAME")  # pares share:usuario acessíveis somente por esse usuário
+SAMBA_USER="$USER_NAME"                               # usuário Samba (criado se não existir)
 SAMBA_GROUP="nasgroup"                             # grupo Samba (criado se não existir)
 WORKGROUP="WORKGROUP"                              # grupo de trabalho do Samba
 DOMAIN="$LOCAL_DOMAIN"                             # domínio da rede local (para Samba)
@@ -95,8 +100,16 @@ NTP_UPSTREAM=("pool.ntp.br" "a.st1.ntp.br")   # fontes de horário externas
 # --- Teste de velocidade da internet ---
 SPEEDTEST_ENABLE="yes"                                  # yes = instala nas-speedtest e os timers
 SPEEDTEST_LOG="/var/log/nas-speedtest.jsonl"             # log dos testes
-SPEEDTEST_OUT="/srv/marcelo/internet_test"               # gráficos salvos em ano/mes dentro desta pasta
+SPEEDTEST_OUT="$USER_HOME/internet_test"        # gráficos salvos em ano/mes dentro desta pasta
 SPEEDTEST_GRAPH_TIME="23:55"                             # horário do gráfico diário (últimas 24 horas)
+
+# --- Dashboard web (marcelinoWeb) ---
+WEB_ENABLE="yes"                                         # yes = instala o dashboard com login
+WEB_PORT=443                                             # porta HTTP (acessível somente pela LAN)
+WEB_STATUS="/srv/nas/monitor/.marcelinoSrv.json"         # JSON publicado pelo marcelinoServer
+WEB_USER="marcelinoweb"                                  # usuário de sistema que executa o serviço
+WEB_ADMIN="$USER_NAME"                                   # usuário web inicial (usa USER_PASSWORD; vazio = cadastre depois com marcelinoWeb useradd)
+WEB_TLS="yes"                                            # yes = gera certificado autoassinado e usa HTTPS
 
 ###############################################################################
 # FUNÇÕES
@@ -134,7 +147,8 @@ install_packages() {
   log "Instalando pacotes..."
   export DEBIAN_FRONTEND=noninteractive
   apt-get update -qq
-  apt-get install -y mdadm samba avahi-daemon ufw python3 python3-psutil smartmontools pciutils fontconfig e2fsprogs util-linux
+  apt-get install -y mdadm samba avahi-daemon ufw python3 python3-psutil smartmontools pciutils fontconfig e2fsprogs util-linux sudo
+  [[ "$WEB_ENABLE" == "yes" && "$WEB_TLS" == "yes" ]] && apt-get install -y openssl
   case "$RAID_FILESYSTEM" in
     xfs) apt-get install -y xfsprogs ;;
     btrfs) apt-get install -y btrfs-progs ;;
@@ -169,12 +183,14 @@ Opções:
   --install      Instala os pacotes necessários
   --raid         Cria e configura o RAID
   --storage      Configura o sistema de arquivos e a criptografia/montagem
+  --user         Cria o usuário principal (USER_NAME) no sistema e no Samba
   --samba        Configura usuários, permissões e compartilhamentos Samba
   --discovery    Ativa descoberta de rede via Avahi e WS-Discovery
   --network      Configura o IP estático (NAS_IP)
   --ntp          Configura o servidor NTP (se NTP_ENABLE=yes)
   --dns          Configura o servidor DNS/DHCP com listas de bloqueio
   --speedtest    Instala o teste de velocidade da internet e seus timers
+  --web          Instala o dashboard web com login (se WEB_ENABLE=yes)
   --firewall     Configura o firewall para os serviços da rede local
   -h, --help     Mostra esta ajuda
 
@@ -192,6 +208,28 @@ detect_wsdd_package() {
     fi
   done
   WSDD_PKG=""
+}
+
+setup_user() {
+  [[ -z "${USER_READY:-}" ]] || return 0
+  [[ -n "$USER_NAME" ]] || die "USER_NAME vazio."
+  [[ "$USER_NAME" =~ ^[a-z_][a-z0-9_-]{0,31}$ ]] || die "USER_NAME inválido: $USER_NAME."
+  [[ -n "$USER_PASSWORD" && "$USER_PASSWORD" != "sua_senha_aqui" ]] \
+    || die "Defina USER_PASSWORD no topo do script."
+  [[ ${#USER_PASSWORD} -ge 8 ]] || die "USER_PASSWORD deve ter ao menos 8 caracteres."
+  log "Configurando usuário $USER_NAME..."
+
+  getent group "$SAMBA_GROUP" >/dev/null || "$SBIN_DIR/groupadd" "$SAMBA_GROUP"
+  if ! id "$USER_NAME" >/dev/null 2>&1; then
+    "$SBIN_DIR/useradd" -M -d "$USER_HOME" -s /bin/bash -G "$SAMBA_GROUP" "$USER_NAME"
+  else
+    "$SBIN_DIR/usermod" -d "$USER_HOME" -aG "$SAMBA_GROUP" "$USER_NAME"
+  fi
+  mkdir -p "$USER_HOME"
+  chown "$USER_NAME":"$(id -gn "$USER_NAME")" "$USER_HOME"
+  printf '%s:%s\n' "$USER_NAME" "$USER_PASSWORD" | "$SBIN_DIR/chpasswd"
+  printf '%s\n%s\n' "$USER_PASSWORD" "$USER_PASSWORD" | smbpasswd -s -a "$USER_NAME" >/dev/null
+  USER_READY=1
 }
 
 setup_raid() {
@@ -304,11 +342,7 @@ setup_storage() {
 setup_samba() {
   log "Configurando Samba..."
   getent group "$SAMBA_GROUP" >/dev/null || "$SBIN_DIR/groupadd" "$SAMBA_GROUP"
-  id "$SAMBA_USER" >/dev/null 2>&1 || "$SBIN_DIR/useradd" -M -s "$SBIN_DIR/nologin" -G "$SAMBA_GROUP" "$SAMBA_USER"
-  if ! pdbedit -L 2>/dev/null | grep -q "^$SAMBA_USER:"; then
-    log "Defina a senha Samba do usuário $SAMBA_USER:"
-    smbpasswd -a "$SAMBA_USER"
-  fi
+  setup_user
 
   cp -n /etc/samba/smb.conf /etc/samba/smb.conf.orig || true
   cat > /etc/samba/smb.conf <<EOF
@@ -643,6 +677,7 @@ setup_speedtest() {
   src="$(dirname "$(readlink -f "$0")")/nas-speedtest.py"
   [[ -f "$src" ]] || die "$src não encontrado."
   log "Instalando teste de velocidade da internet..."
+  setup_user
 
   install -m 755 "$src" /usr/local/bin/nas-speedtest
   sed -i "s|^DEFAULT_LOG = .*|DEFAULT_LOG = \"$SPEEDTEST_LOG\"|; s|^DEFAULT_OUT = .*|DEFAULT_OUT = \"$SPEEDTEST_OUT\"|" /usr/local/bin/nas-speedtest
@@ -696,6 +731,60 @@ EOF
   systemctl enable --now nas-speedtest.timer nas-speedtest-graph.timer
 }
 
+setup_web() {
+  [[ "$WEB_ENABLE" == "yes" ]] || return 0
+  local dir src tls_args=""
+  dir="$(dirname "$(readlink -f "$0")")"
+  src="$dir/marcelinoWeb.py"
+  [[ -f "$src" && -f "$dir/marcelinoWeb.service" ]] || die "marcelinoWeb.py/.service não encontrados em $dir."
+  log "Instalando dashboard web..."
+
+  id "$WEB_USER" >/dev/null 2>&1 || useradd --system --no-create-home --shell /usr/sbin/nologin "$WEB_USER"
+  install -d -o root -g root -m 0755 /opt/marcelinoWeb
+  install -o root -g root -m 0644 "$src" /opt/marcelinoWeb/marcelinoWeb.py
+  install -d -o "$WEB_USER" -g "$WEB_USER" -m 0700 /etc/marcelinoWeb
+
+  if [[ "$WEB_TLS" == "yes" ]]; then
+    if [[ ! -f /etc/marcelinoWeb/cert.pem ]]; then
+      openssl req -x509 -newkey rsa:3072 -nodes -days 3650 -subj "/CN=$(hostname)" \
+        -addext "subjectAltName=DNS:$(hostname),DNS:$(hostname).$LOCAL_DOMAIN,IP:$NAS_IP" \
+        -keyout /etc/marcelinoWeb/key.pem -out /etc/marcelinoWeb/cert.pem 2>/dev/null
+    fi
+    chown "$WEB_USER":"$WEB_USER" /etc/marcelinoWeb/key.pem /etc/marcelinoWeb/cert.pem
+    chmod 600 /etc/marcelinoWeb/key.pem
+    tls_args="--cert /etc/marcelinoWeb/cert.pem --key /etc/marcelinoWeb/key.pem"
+  fi
+
+  cat > /etc/default/marcelinoWeb <<EOF
+MARCELINOWEB_HOST=0.0.0.0
+MARCELINOWEB_PORT=$WEB_PORT
+MARCELINOWEB_STATUS=$WEB_STATUS
+MARCELINOWEB_TLS_ARGS="$tls_args"
+EOF
+  install -o root -g root -m 0644 "$dir/marcelinoWeb.service" /etc/systemd/system/marcelinoWeb.service
+  cat > /usr/local/bin/marcelinoWeb <<'EOF'
+#!/bin/sh
+exec sudo -u marcelinoweb /usr/bin/python3 /opt/marcelinoWeb/marcelinoWeb.py --users /etc/marcelinoWeb/users.json "$@"
+EOF
+  chmod 755 /usr/local/bin/marcelinoWeb
+
+  if [[ -n "$WEB_ADMIN" ]]; then
+    local web_cmd=useradd
+    log "Cadastrando o usuário web '$WEB_ADMIN'..."
+    [[ "$WEB_ADMIN" == "$USER_NAME" ]] || die "WEB_ADMIN deve ser igual a USER_NAME ou ficar vazio."
+    setup_user
+    /usr/local/bin/marcelinoWeb users | grep -qx "$WEB_ADMIN" && web_cmd=passwd
+    printf '%s\n' "$USER_PASSWORD" | /usr/local/bin/marcelinoWeb "$web_cmd" "$WEB_ADMIN" \
+      || warn "Usuário web não cadastrado."
+  else
+    warn "Nenhum usuário web cadastrado. Execute: sudo marcelinoWeb useradd NOME"
+  fi
+
+  systemctl daemon-reload
+  systemctl enable marcelinoWeb.service
+  systemctl restart marcelinoWeb.service
+}
+
 setup_firewall() {
   log "Configurando firewall (ufw) para $LAN_CIDR..."
   "$SBIN_DIR/ufw" --force reset >/dev/null
@@ -708,6 +797,7 @@ setup_firewall() {
   "$SBIN_DIR/ufw" allow from "$LAN_CIDR" to any port 5353 proto udp comment 'mDNS'
   "$SBIN_DIR/ufw" allow from "$LAN_CIDR" to any port 3702 proto udp comment 'WS-Discovery'
   "$SBIN_DIR/ufw" allow from "$LAN_CIDR" to any port 5357 proto tcp comment 'WSD HTTP'
+  [[ "$WEB_ENABLE" == "yes" ]] && "$SBIN_DIR/ufw" allow from "$LAN_CIDR" to any port "$WEB_PORT" proto tcp comment 'Dashboard web'
   [[ "$NTP_ENABLE" == "yes" ]] && "$SBIN_DIR/ufw" allow from "$LAN_CIDR" to any port 123 proto udp comment 'NTP'
   if [[ "$DNS_ENABLE" == "yes" ]]; then
     "$SBIN_DIR/ufw" allow from "$LAN_CIDR" to any port 53 comment 'DNS'
@@ -741,12 +831,14 @@ while [[ $# -gt 0 ]]; do
     --install)   SELECTED_STEPS+=(install) ;;
     --raid)      SELECTED_STEPS+=(raid) ;;
     --storage)   SELECTED_STEPS+=(storage) ;;
+    --user)      SELECTED_STEPS+=(user) ;;
     --samba)     SELECTED_STEPS+=(samba) ;;
     --discovery) SELECTED_STEPS+=(discovery) ;;
     --network)   SELECTED_STEPS+=(network) ;;
     --ntp)       SELECTED_STEPS+=(ntp) ;;
     --dns)       SELECTED_STEPS+=(dns) ;;
     --speedtest) SELECTED_STEPS+=(speedtest) ;;
+    --web)       SELECTED_STEPS+=(web) ;;
     --firewall)  SELECTED_STEPS+=(firewall) ;;
     -h|--help)   show_help; exit 0 ;;
     *)           die "Opção desconhecida: $1. Use --help para ver as opções." ;;
@@ -768,7 +860,7 @@ if [[ "$RUN_ALL" == "yes" ]]; then
 else
   for step in "${SELECTED_STEPS[@]}"; do
     case "$step" in
-      samba|ntp|firewall) NEEDS_LAN="yes" ;;
+      samba|ntp|web|firewall) NEEDS_LAN="yes" ;;
     esac
   done
 fi
@@ -778,12 +870,12 @@ if [[ "$NEEDS_LAN" == "yes" ]]; then
 fi
 
 if [[ "$RUN_ALL" == "yes" ]]; then
-  SELECTED_STEPS=(install network raid storage samba discovery ntp dns speedtest firewall)
+  SELECTED_STEPS=(install network raid storage user samba discovery ntp dns speedtest web firewall)
 fi
 
 # Executa na ordem canônica, independentemente da ordem dos argumentos
 ORDERED_STEPS=()
-for s in install network raid storage samba discovery ntp dns speedtest firewall; do
+for s in install network raid storage user samba discovery ntp dns speedtest web firewall; do
   for step in "${SELECTED_STEPS[@]}"; do
     [[ "$step" == "$s" ]] && ORDERED_STEPS+=("$s")
   done
@@ -795,12 +887,14 @@ for step in "${SELECTED_STEPS[@]}"; do
     install)   install_packages ;;
     raid)      setup_raid ;;
     storage)   setup_storage ;;
+    user)      setup_user ;;
     samba)     setup_samba ;;
     discovery) detect_wsdd_package; setup_discovery ;;
     network)   setup_network ;;
     ntp)       setup_ntp ;;
     dns)       setup_dns ;;
     speedtest) setup_speedtest ;;
+    web)       setup_web ;;
     firewall)  setup_firewall ;;
   esac
 done

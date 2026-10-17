@@ -372,6 +372,13 @@ class Remote:
         with smbclient.open_file(self.unc(share, path), mode="r", encoding="utf-8") as status_file:
             return json.load(status_file)
 
+    def is_available(self):
+        try:
+            with socket.create_connection((self.host, SMB_PORT), timeout=2):
+                return True
+        except OSError:
+            return False
+
     def ensure_dir(self, share, path):
         smbclient.makedirs(self.unc(share, path), exist_ok=True)
 
@@ -2377,16 +2384,18 @@ class App(ctk.CTk):
             try:
                 data = remote.read_status(share, STATUS_FILENAME)
                 error = None
+                server_available = True
             except Exception as exc:
                 data = None
                 error = str(exc)
+                server_available = remote.is_available()
             self.ui(lambda: self._server_status_received(
-                generation, remote, share, data, error,
+                generation, remote, share, data, error, server_available,
             ))
 
         threading.Thread(target=run, daemon=True).start()
 
-    def _server_status_received(self, generation, remote, share, data, error):
+    def _server_status_received(self, generation, remote, share, data, error, server_available):
         if generation != self.status_generation or remote is not self.remote:
             return
         self.status_polling_generation = None
@@ -2394,6 +2403,10 @@ class App(ctk.CTk):
             self._request_server_status(generation)
             return
         if error:
+            if not server_available:
+                self.say(f"Conexão com {remote.host} perdida; encerrando a sessão.")
+                self.disconnect()
+                return
             self._reset_server_dashboard(
                 f"Sem dados do agente em {share}: {error}",
             )
