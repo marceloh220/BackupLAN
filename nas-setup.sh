@@ -92,6 +92,7 @@ DHCP_LEASE="12h"
 # --- Rede / Firewall ---
 LAN_CIDR=""                        # ex.: "192.168.1.0/24". Vazio = deriva de NAS_IP/NAS_PREFIX (ou detecta)
 SSH_PORT=22                        # porta SSH do servidor NAS
+SSH_MAX_SESSION=600                # segundos de inatividade até encerrar a sessão SSH (10 min)
 
 # --- NTP (servidor de horário para a rede local) ---
 NTP_ENABLE="yes"                              # yes = instala e configura o chrony como servidor NTP da LAN
@@ -191,6 +192,7 @@ Opções:
   --dns          Configura o servidor DNS/DHCP com listas de bloqueio
   --speedtest    Instala o teste de velocidade da internet e seus timers
   --web          Instala o dashboard web com login (se WEB_ENABLE=yes)
+  --ssh          Limita sessões SSH a SSH_MAX_SESSION segundos de inatividade
   --firewall     Configura o firewall para os serviços da rede local
   -h, --help     Mostra esta ajuda
 
@@ -322,7 +324,7 @@ setup_storage() {
   luks_uuid=$("$SBIN_DIR/cryptsetup" luksUUID "$CRYPT_DEVICE")
   fs_uuid=$("$SBIN_DIR/blkid" -s UUID -o value "/dev/mapper/$CRYPT_NAME")
 
-  sed -i "/^$CRYPT_NAME[[:space:]]/d" /etc/crypttab 2>/dev/null || true
+  sed -i "/^${CRYPT_NAME}[[:space:]]/d" /etc/crypttab 2>/dev/null || true
   if [[ "$CRYPT_AUTO_UNLOCK" == "yes" ]]; then
     # Com keyfile abre sozinho; sem keyfile ("none") a senha é pedida no boot.
     echo "$CRYPT_NAME UUID=$luks_uuid $crypttab_key $crypttab_opts,nofail" >> /etc/crypttab
@@ -785,6 +787,23 @@ EOF
   systemctl restart marcelinoWeb.service
 }
 
+setup_ssh() {
+  log "Configurando SSH: encerra sessões após $SSH_MAX_SESSION s de inatividade..."
+  cat > /etc/profile.d/ssh-timeout.sh <<EOF
+# Gerado por nas-setup.sh
+TMOUT=$SSH_MAX_SESSION
+readonly TMOUT
+export TMOUT
+EOF
+  chmod 644 /etc/profile.d/ssh-timeout.sh
+  mkdir -p /etc/ssh/sshd_config.d
+  cat > /etc/ssh/sshd_config.d/10-timeout.conf <<EOF
+ClientAliveInterval 60
+ClientAliveCountMax 3
+EOF
+  systemctl reload ssh 2>/dev/null || systemctl reload sshd
+}
+
 setup_firewall() {
   log "Configurando firewall (ufw) para $LAN_CIDR..."
   "$SBIN_DIR/ufw" --force reset >/dev/null
@@ -839,6 +858,7 @@ while [[ $# -gt 0 ]]; do
     --dns)       SELECTED_STEPS+=(dns) ;;
     --speedtest) SELECTED_STEPS+=(speedtest) ;;
     --web)       SELECTED_STEPS+=(web) ;;
+    --ssh)       SELECTED_STEPS+=(ssh) ;;
     --firewall)  SELECTED_STEPS+=(firewall) ;;
     -h|--help)   show_help; exit 0 ;;
     *)           die "Opção desconhecida: $1. Use --help para ver as opções." ;;
@@ -870,12 +890,12 @@ if [[ "$NEEDS_LAN" == "yes" ]]; then
 fi
 
 if [[ "$RUN_ALL" == "yes" ]]; then
-  SELECTED_STEPS=(install network raid storage user samba discovery ntp dns speedtest web firewall)
+  SELECTED_STEPS=(install network raid storage user samba discovery ntp dns speedtest web ssh firewall)
 fi
 
 # Executa na ordem canônica, independentemente da ordem dos argumentos
 ORDERED_STEPS=()
-for s in install network raid storage user samba discovery ntp dns speedtest web firewall; do
+for s in install network raid storage user samba discovery ntp dns speedtest web ssh firewall; do
   for step in "${SELECTED_STEPS[@]}"; do
     [[ "$step" == "$s" ]] && ORDERED_STEPS+=("$s")
   done
@@ -895,6 +915,7 @@ for step in "${SELECTED_STEPS[@]}"; do
     dns)       setup_dns ;;
     speedtest) setup_speedtest ;;
     web)       setup_web ;;
+    ssh)       setup_ssh ;;
     firewall)  setup_firewall ;;
   esac
 done

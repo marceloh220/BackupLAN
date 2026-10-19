@@ -866,6 +866,7 @@ class App(ctk.CTk):
         self.tab_container.pack(fill="both", expand=True)
         self.add_tab("Sistema", "▦", self._build_system_page)
         self.add_tab("Discos", "◉", self._build_disks_page)
+        self.add_tab("RAID", "▤", self._build_raid_page)
         self.add_tab("Internet", "🌐", self._build_internet_page)
         self.add_tab("DNS / DHCP", "↔", self._build_dns_dhcp_page)
         self.add_tab("Compartilhamentos", "▤", self._build_shares_page)
@@ -1679,6 +1680,52 @@ class App(ctk.CTk):
         self.storage_status = tk.StringVar(value="Aguardando métricas de armazenamento.")
         VariableLabel(storage, self.storage_status).pack(anchor="w", padx=8, pady=(4, 2))
 
+    def _build_raid_page(self, page):
+        content = ctk.CTkScrollableFrame(
+            page,
+            fg_color=THEME_PALETTE["background"],
+            scrollbar_fg_color=THEME_PALETTE["background"],
+            scrollbar_button_color=THEME_PALETTE["border"],
+            scrollbar_button_hover_color=THEME_PALETTE["accent"],
+        )
+        content.pack(fill="both", expand=True, padx=8, pady=4)
+
+        overview = self._section(content, "Estado geral do RAID")
+        overview.pack(fill="x", padx=2, pady=(0, 4))
+        self.raid_status_text = tk.StringVar(value="Aguardando dados do servidor.")
+        self.raid_status_label = ctk.CTkLabel(
+            overview,
+            textvariable=self.raid_status_text,
+            anchor="w",
+            font=ctk.CTkFont(size=14, weight="bold"),
+        )
+        self.raid_status_label.pack(anchor="w", padx=12, pady=8)
+
+        arrays_panel = self._section(content, "Arrays e sincronização")
+        arrays_panel.pack(fill="x", padx=2, pady=4)
+        self.raid_array_grid = ctk.CTkFrame(arrays_panel, fg_color="transparent")
+        self.raid_array_grid.pack(fill="x", padx=8, pady=(0, 8))
+        columns = ((0, 1, 150), (1, 1, 100), (2, 1, 130), (3, 1, 120), (4, 2, 180))
+        for column, weight, minsize in columns:
+            self.raid_array_grid.grid_columnconfigure(column, weight=weight, minsize=minsize)
+        for column, title in enumerate(("Array", "Nível", "Estado", "Discos", "Atividade")):
+            ctk.CTkLabel(
+                self.raid_array_grid,
+                text=title,
+                anchor="w",
+                text_color=THEME_PALETTE["muted"],
+            ).grid(row=0, column=column, sticky="ew", padx=(4, 12), pady=(0, 4))
+        self.raid_rows_container = ctk.CTkFrame(self.raid_array_grid, fg_color="transparent")
+        self.raid_rows_container.grid(row=1, column=0, columnspan=5, sticky="ew")
+        self.raid_rows = {}
+        self.raid_empty_label = ctk.CTkLabel(
+            self.raid_rows_container,
+            text="Aguardando dados do servidor.",
+            anchor="w",
+            text_color=THEME_PALETTE["muted"],
+        )
+        self.raid_empty_label.pack(anchor="w", padx=4, pady=4)
+
     def _build_dns_dhcp_page(self, page):
         content = ctk.CTkScrollableFrame(page, fg_color=THEME_PALETTE["background"])
         content.pack(fill="both", expand=True, padx=8, pady=4)
@@ -2037,6 +2084,8 @@ class App(ctk.CTk):
         self._render_system_filesystems([])
         self._render_samba_shares([])
         self._render_physical_disks([])
+        self.__dict__.setdefault("_render_cache", {}).pop("raid", None)
+        self._render_raid_status(None)
         self.dns_dhcp_status.set(message)
         self.dhcp_lease_rendered = None
         self._render_dhcp_leases([])
@@ -2208,6 +2257,85 @@ class App(ctk.CTk):
                 )
             else:
                 row_widgets["divider"].grid_remove()
+
+    def _render_raid_status(self, raid):
+        if self._unchanged("raid", raid):
+            return
+
+        if not isinstance(raid, dict):
+            raid = {}
+            status = "Indisponível"
+            empty_message = "Atualize o agente do servidor para publicar o estado do RAID."
+        else:
+            status = raid.get("status") or "Indisponível"
+            if status == "Sem RAID detectado":
+                empty_message = "Nenhum array RAID detectado no sistema."
+            elif status == "Indisponível":
+                empty_message = "Não foi possível consultar o estado do RAID."
+            else:
+                empty_message = "Nenhum array RAID publicado pelo servidor."
+
+        if status == "OK":
+            status_color = self.theme_colors["accent"]
+        elif status in ("Degradada", "Inativa"):
+            status_color = "#d64f5f"
+        else:
+            status_color = self.theme_colors["muted"]
+        self.raid_status_text.set(f"Estado geral: {status}")
+        self.raid_status_label.configure(text_color=status_color)
+
+        arrays = raid.get("arrays", [])
+        if not isinstance(arrays, list):
+            arrays = []
+        current_arrays = {
+            array.get("name", f"Array {index + 1}"): array
+            for index, array in enumerate(arrays)
+            if isinstance(array, dict)
+        }
+        for name in set(self.raid_rows) - set(current_arrays):
+            self.raid_rows.pop(name)["frame"].destroy()
+
+        if not current_arrays:
+            self.raid_empty_label.configure(text=empty_message)
+            self.raid_empty_label.pack(anchor="w", padx=4, pady=4)
+            return
+        self.raid_empty_label.pack_forget()
+
+        for name, array in current_arrays.items():
+            row_widgets = self.raid_rows.get(name)
+            if row_widgets is None:
+                row = ctk.CTkFrame(self.raid_rows_container, fg_color="transparent")
+                for column, weight, minsize in (
+                    (0, 1, 150), (1, 1, 100), (2, 1, 130), (3, 1, 120), (4, 2, 180),
+                ):
+                    row.grid_columnconfigure(column, weight=weight, minsize=minsize)
+                labels = [ctk.CTkLabel(row, text="", anchor="w") for _ in range(5)]
+                for column, label in enumerate(labels):
+                    label.grid(row=0, column=column, sticky="ew", padx=(4, 12), pady=5)
+                row_widgets = {"frame": row, "labels": labels}
+                self.raid_rows[name] = row_widgets
+            row_widgets["frame"].pack(fill="x", padx=2, pady=2)
+
+            active = array.get("active_devices")
+            total = array.get("total_devices")
+            devices = f"{active}/{total}" if active is not None and total is not None else "--"
+            progress = array.get("progress_percent")
+            activity = array.get("sync_action")
+            if activity and isinstance(progress, (int, float)):
+                activity = f"{activity} · {progress:.1f}%"
+            elif not activity:
+                activity = "--"
+            values = (name, array.get("level") or "--", array.get("status") or "--", devices, activity)
+            for column, (label, value) in enumerate(zip(row_widgets["labels"], values)):
+                label.configure(text=value)
+                if column == 2:
+                    row_status = array.get("status")
+                    row_color = (
+                        self.theme_colors["accent"] if row_status == "Ativa"
+                        else "#d64f5f" if row_status in ("Degradada", "Inativa")
+                        else self.theme_colors["muted"]
+                    )
+                    label.configure(text_color=row_color)
 
     def _render_samba_shares(self, shares):
         if shares:
@@ -2483,6 +2611,7 @@ class App(ctk.CTk):
             self._render_system_filesystems(data.get("filesystems", []))
             self._render_samba_shares(data.get("samba_shares"))
             self._render_physical_disks(data["physical_disks"])
+            self._render_raid_status(data.get("raid"))
             self._render_dns_dhcp(data.get("dns_dhcp", {}))
             self._render_internet_status(data.get("internet", {}))
             status_notes = []

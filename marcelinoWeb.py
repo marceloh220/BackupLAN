@@ -259,6 +259,7 @@ const kv = pairs => { const r = pairs.map(p => [p[0], p[1]]); r.pairs = true; re
 const ICONS = {
   'Sistema': '\u{1F5A5}\uFE0F', 'CPU e memória': '\u{1F4CA}', 'Rede e internet': '\u{1F310}',
   'Armazenamento': '\u{1F4BE}', 'Discos (SMART)': '\u{1FA7A}', 'Compartilhamentos Samba': '\u{1F4C1}',
+    'Estado do RAID': '\u{1F5C3}\uFE0F',
   'DNS / DHCP': '\u{1F9ED}', 'Leases DHCP': '\u{1F4CB}', 'Consultas bloqueadas recentes': '\u{1F6E1}\uFE0F',
 };
 const sec = (title, ...kids) => $('section', null, [$('h2', {t: (ICONS[title] || '') + ' ' + title}), ...kids]);
@@ -303,6 +304,20 @@ function render(s) {
     fsRows.push([p.mountpoint, bytes(p.used_bytes) + ' / ' + bytes(p.total_bytes), bar(p.percent)]);
   });
   main.append(sec('Armazenamento', table(fsRows)));
+    const raid = s.raid || {};
+    const raidStatus = raid.status || 'Indisponível';
+    const raidClass = raidStatus === 'OK' ? 'ok' :
+        ['Degradada', 'Inativa'].includes(raidStatus) ? 'bad' : 'muted';
+    const raidRows = [['Array', 'Nível', 'Estado', 'Discos', 'Atividade']].concat(
+        (raid.arrays || []).map(a => [
+            a.name, a.level, cell(a.status, a.status === 'Ativa' ? 'ok' :
+                a.status === 'Degradada' || a.status === 'Inativa' ? 'bad' : 'muted'),
+            a.active_devices != null && a.total_devices != null ?
+                a.active_devices + '/' + a.total_devices : '-',
+            a.sync_action ? a.sync_action + ' ' + a.progress_percent + '%' : '-',
+        ]));
+    if (raidRows.length === 1) raidRows.push(['-', '-', cell(raidStatus, raidClass), '-', '-']);
+    main.append(sec('Estado do RAID', table(raidRows)));
   const dRows = [['Disco', 'Modelo', 'Temp.', 'SMART']].concat((s.physical_disks || []).map(d => [
     d.name, d.model, d.temperature_c != null ? d.temperature_c + ' °C' : '-',
     cell(d.smart_status, d.smart_status === 'OK' ? 'ok' : d.smart_status === 'Falha' ? 'bad' : 'muted'),

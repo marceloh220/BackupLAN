@@ -37,6 +37,7 @@ import logging
 import math
 import os
 import platform
+import re
 import shutil
 import socket
 import subprocess
@@ -594,6 +595,62 @@ def collect_system_filesystems():
     return sorted(filesystems, key=lambda filesystem: filesystem["device"].casefold())
 
 
+def collect_raid_status(mdstat_path="/proc/mdstat"):
+    try:
+        lines = Path(mdstat_path).read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return {"status": "Indisponível", "arrays": []}
+
+    arrays = []
+    for index, line in enumerate(lines):
+        match = re.match(r"^(md\w+)\s*:\s*(.*)$", line)
+        if not match:
+            continue
+
+        name, header = match.groups()
+        header_parts = header.split()
+        array = {
+            "name": f"/dev/{name}",
+            "status": "Ativa" if header_parts and header_parts[0] == "active" else "Inativa",
+            "level": next((part for part in header_parts if part.startswith("raid")), "-"),
+            "active_devices": None,
+            "total_devices": None,
+            "sync_action": None,
+            "progress_percent": None,
+        }
+
+        for detail in lines[index + 1:]:
+            if re.match(r"^md\w+\s*:", detail):
+                break
+            counts = re.search(r"\[(\d+)/(\d+)\]\s+\[([U_]+)\]", detail)
+            if counts:
+                array["total_devices"] = int(counts.group(1))
+                array["active_devices"] = int(counts.group(2))
+                if counts.group(1) != counts.group(2) or "_" in counts.group(3):
+                    array["status"] = "Degradada"
+            progress = re.search(r"(resync|recovery|reshape|check)\s*=\s*([\d.]+)%", detail)
+            if progress:
+                array["sync_action"] = progress.group(1)
+                array["progress_percent"] = float(progress.group(2))
+                if array["status"] != "Degradada":
+                    array["status"] = "Sincronizando"
+
+        arrays.append(array)
+
+    statuses = {array["status"] for array in arrays}
+    if "Degradada" in statuses:
+        status = "Degradada"
+    elif "Inativa" in statuses:
+        status = "Inativa"
+    elif "Sincronizando" in statuses:
+        status = "Sincronizando"
+    elif arrays:
+        status = "OK"
+    else:
+        status = "Sem RAID detectado"
+    return {"status": status, "arrays": arrays}
+
+
 def collect_internet_status(log_path=SPEEDTEST_LOG_PATH):
     global _speedtest_log_cache
 
@@ -939,6 +996,7 @@ def collect_status(smb_config=None, smartctl_path=None):
         "dns_dhcp": collect_dns_dhcp(),
         "internet": collect_internet_status(),
         "filesystems": filesystems,
+        "raid": collect_raid_status(),
         "sampled_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "uptime_seconds": max(0, int(time.time() - psutil.boot_time())),
         "cpu_percent": psutil.cpu_percent(interval=0.5),

@@ -13,6 +13,7 @@ from marcelinoClient import App
 SCREENS = (
     "Sistema",
     "Discos",
+    "RAID",
     "Internet",
     "DNS / DHCP",
     "Compartilhamentos",
@@ -72,6 +73,20 @@ SAMPLE_STATUS = {
             "smart_status": "PASSED",
         },
     ],
+    "raid": {
+        "status": "Sincronizando",
+        "arrays": [
+            {
+                "name": "/dev/md0",
+                "level": "raid1",
+                "status": "Sincronizando",
+                "active_devices": 2,
+                "total_devices": 2,
+                "sync_action": "recovery",
+                "progress_percent": 62.4,
+            },
+        ],
+    },
     "samba_shares": [
         {
             "name": "Publico",

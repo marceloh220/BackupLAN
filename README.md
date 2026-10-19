@@ -8,11 +8,11 @@ Este projeto reúne o script de configuração de um NAS Debian, um agente que p
 |---|---|---|
 | Configuração do NAS | `nas-setup.sh` | Prepara IP estático, armazenamento, Samba, descoberta de rede, NTP, DNS/DHCP com bloqueio de anúncios/rastreadores e firewall. |
 | Teste de velocidade | `nas-speedtest.py` | Mede download, upload e ping; registra resultados em JSONL, lista testes e gera gráficos. |
-| Agente de estatísticas | `marcelinoServer.py` | Publica métricas do servidor e regras de compartilhamento Samba em JSON. |
+| Agente de estatísticas | `marcelinoServer.py` | Publica métricas do servidor, estado dos arrays RAID e regras de compartilhamento Samba em JSON. |
 | Serviço systemd | `marcelinoServer.service` | Executa o agente após a inicialização do sistema. |
 | Instalador do agente | `install_marcelinoServer.sh` | Instala o agente, configura o arquivo de ambiente e inicia o serviço. |
-| Dashboard web | `marcelinoWeb.py`, `marcelinoWeb.service` | Servidor web com login que exibe as métricas publicadas pelo agente, acessível pela rede local. |
-| Cliente Windows | `marcelinoClient.py` | Interface para estatísticas, compartilhamentos, backup/restauração e terminal SSH. |
+| Dashboard web | `marcelinoWeb.py`, `marcelinoWeb.service` | Servidor web com login que exibe as métricas publicadas pelo agente, incluindo estado e sincronização do RAID, acessível pela rede local. |
+| Cliente Windows | `marcelinoClient.py` | Interface para métricas do servidor, discos e RAID, compartilhamentos, backup/restauração e terminal SSH. |
 | Prévia do cliente | `preview_marcelinoClient.py` | Abre uma aba com dados genéricos locais, sem conexão com servidor. |
 | Instalador do cliente | `install_marcelinoClient.ps1` | Instala dependências, gera o executável e cria atalhos. |
 
@@ -39,8 +39,9 @@ As etapas podem ser executadas separadamente ou combinadas:
 | `--dns` | Configura o dnsmasq como DNS e DHCP da LAN (veja abaixo). |
 | `--speedtest` | Instala `nas-speedtest` (a partir de `nas-speedtest.py`) e os timers de teste e gráfico (veja abaixo). |
 | `--web` | Instala o dashboard web com login (veja abaixo). |
+| `--ssh` | Encerra sessões SSH interativas após `SSH_MAX_SESSION` segundos de inatividade (padrão 600, ou seja, 10 min) via `TMOUT`, e derruba clientes que não respondem (`ClientAliveInterval`/`ClientAliveCountMax`). |
 | `--firewall` | Configura UFW para SSH, Samba, descoberta, DNS (53), DHCP (67/udp) e, se habilitado, NTP e a porta do dashboard (`WEB_PORT`). A configuração redefine as regras atuais do UFW. |
-| `--all` | Executa as etapas na ordem recomendada: instalação, rede, RAID, armazenamento, Samba, descoberta, NTP, DNS/DHCP, teste de velocidade, dashboard web e firewall. |
+| `--all` | Executa as etapas na ordem recomendada: instalação, rede, RAID, armazenamento, Samba, descoberta, NTP, DNS/DHCP, teste de velocidade, dashboard web, SSH e firewall. |
 
 As opções são editadas na seção **CONFIGURAÇÃO** no começo do script. Os valores fornecidos incluem:
 
@@ -137,7 +138,7 @@ sudo bash nas-setup.sh --samba --discovery
 
 ## Serviço de estatísticas
 
-O agente `marcelinoServer.py` coleta carga, frequência e temperatura da CPU, memória, tempo ativo, rede, informações do sistema, sistemas de arquivos montados, discos físicos/SMART, configuração dos compartilhamentos Samba e estado/atividade DNS e DHCP. Frequência e temperatura são opcionais: aparecem indisponíveis se o hardware ou o sistema não expuserem esses dados. O JSON padrão chama-se `.marcelinoSrv.json`.
+O agente `marcelinoServer.py` coleta carga, frequência e temperatura da CPU, memória, tempo ativo, rede, informações do sistema, sistemas de arquivos montados, discos físicos/SMART, estado e atividade dos arrays RAID via `/proc/mdstat`, configuração dos compartilhamentos Samba e estado/atividade DNS e DHCP. Frequência e temperatura são opcionais: aparecem indisponíveis se o hardware ou o sistema não expuserem esses dados. O JSON padrão chama-se `.marcelinoSrv.json`.
 
 O instalador deve ser executado no servidor Linux, depois de instalar/configurar o Samba:
 
@@ -182,7 +183,7 @@ O serviço é executado como `root`, aguarda a rede e `smbd` e publica o arquivo
 
 ## Dashboard web
 
-O `marcelinoWeb.py` (somente biblioteca padrão do Python) lê o JSON publicado pelo `marcelinoServer` e o exibe em uma página com atualização a cada 5 s: sistema, CPU e memória, rede e internet, armazenamento, discos SMART, shares Samba, DNS/DHCP, leases e consultas bloqueadas. O acesso exige login.
+O `marcelinoWeb.py` (somente biblioteca padrão do Python) lê o JSON publicado pelo `marcelinoServer` e o exibe em uma página com atualização a cada 5 s: sistema, CPU e memória, rede e internet, armazenamento, estado e sincronização do RAID, discos SMART, shares Samba, DNS/DHCP, leases e consultas bloqueadas. O acesso exige login.
 
 Instalação (`marcelinoWeb.py` e `marcelinoWeb.service` devem estar na pasta do `nas-setup.sh`):
 
@@ -243,7 +244,7 @@ Para inspecionar uma aba sem autenticar ou conectar a um servidor, execute `prev
 .\.venv\Scripts\python.exe preview_marcelinoClient.py --screen "DNS / DHCP"
 ```
 
-As opções de `--screen` são `Sistema`, `Discos`, `Internet`, `DNS / DHCP`, `Compartilhamentos`, `Backup` e `Terminal`. O preview usa dados genéricos locais; Backup e Terminal também mostram exemplos sem iniciar transferências nem conexão SSH.
+As opções de `--screen` são `Sistema`, `Discos`, `RAID`, `Internet`, `DNS / DHCP`, `Compartilhamentos`, `Backup` e `Terminal`. O preview usa dados genéricos locais; a tela RAID mostra um array de demonstração em recuperação, e Backup e Terminal também mostram exemplos sem iniciar transferências nem conexão SSH.
 
 ### Login
 
@@ -262,6 +263,10 @@ Mostra carga, frequência e temperatura da CPU, uso de memória, tempo ativo, tr
 Apresenta barras de uso dos sistemas de arquivos montados e uma tabela dos discos físicos com modelo, capacidade, temperatura e status SMART. Os dados SMART dependem do `smartmontools`/`smartctl` no servidor.
 
 ![Sistemas de arquivos e discos SMART](assets/03_tela_discos.png)
+
+### RAID
+
+Mostra o estado geral dos arrays RAID detectados pelo agente e, para cada array, dispositivo, nível, estado, quantidade de discos ativos e atividade de sincronização. O campo **Atividade** indica operações em andamento, como `resync`, `recovery`, `reshape` ou `check`, com o percentual informado pelo sistema; `--` significa que nenhuma atividade com progresso foi reportada. Os dados vêm de `/proc/mdstat` no servidor Linux e exigem uma versão do agente que publique o campo `raid` no JSON.
 
 ### Internet
 
@@ -303,9 +308,9 @@ Mostra o estado da conexão SSH ativa com o servidor, incluindo o usuário conec
 
 ```text
 marcelinoServer.py
-    -> coleta métricas e diretivas de smb.conf
+    -> coleta métricas, estado RAID e diretivas de smb.conf
     -> publica .marcelinoSrv.json no share público
-    -> cliente SMB lê e apresenta os dados nas abas Sistema, Discos e Compartilhamentos
+    -> cliente SMB lê e apresenta os dados nas abas Sistema, Discos, RAID e Compartilhamentos
 
 marcelino Client
     -> acessa arquivos e destinos por SMB
