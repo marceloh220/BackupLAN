@@ -2,6 +2,8 @@
 
 Este projeto reúne o script de configuração de um NAS Debian, um agente que publica estatísticas do servidor em um compartilhamento Samba e o aplicativo Windows `marcelino Client`.
 
+PS: Sim, eu não sei escolher nomes =/
+
 ## Componentes
 
 | Componente | Arquivo | Função |

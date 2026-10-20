@@ -50,12 +50,12 @@ SHARES=(
   "Publico:/srv/nas/publico"
   "Privado:/srv/nas/privado"
   "Backup:/srv/nas/backup"
-  "Midia:/srv/nas/midia"
+  "Media:/srv/nas/media"
   "${USER_NAME^}:$USER_HOME"
   "Monitor:/srv/nas/monitor"
 )
 PUBLIC_SHARES=("Publico")                          # nomes de shares acessíveis sem senha (guest)
-GROUP_SHARES=("Backup" "Midia")                    # shares acessíveis ao grupo SAMBA_GROUP
+GROUP_SHARES=("Backup" "Media")                    # shares acessíveis ao grupo SAMBA_GROUP
 READONLY_SHARES=("Monitor")                        # shares visíveis, somente leitura (gravados localmente pelo marcelinoServer)
 USER_SHARES=("${USER_NAME^}:$USER_NAME" "Privado:$USER_NAME")  # pares share:usuario acessíveis somente por esse usuário
 SAMBA_USER="$USER_NAME"                               # usuário Samba (criado se não existir)
@@ -112,6 +112,10 @@ WEB_USER="marcelinoweb"                                  # usuário de sistema q
 WEB_ADMIN="$USER_NAME"                                   # usuário web inicial (usa USER_PASSWORD; vazio = cadastre depois com marcelinoWeb useradd)
 WEB_TLS="yes"                                            # yes = gera certificado autoassinado e usa HTTPS
 
+# --- DLNA (servidor de mídia) ---
+DLNA_ENABLE="yes"                        # yes = instala e configura o servidor DLNA
+DLNA_MEDIA_DIR="/srv/nas/media"          # raiz que contém Movies, Music e Pictures
+
 ###############################################################################
 # FUNÇÕES
 ###############################################################################
@@ -148,7 +152,7 @@ install_packages() {
   log "Instalando pacotes..."
   export DEBIAN_FRONTEND=noninteractive
   apt-get update -qq
-  apt-get install -y mdadm samba avahi-daemon ufw python3 python3-psutil smartmontools pciutils fontconfig e2fsprogs util-linux sudo
+  apt-get install -y mdadm samba avahi-daemon minidlna ufw python3 python3-psutil smartmontools pciutils fontconfig e2fsprogs util-linux sudo
   [[ "$WEB_ENABLE" == "yes" && "$WEB_TLS" == "yes" ]] && apt-get install -y openssl
   case "$RAID_FILESYSTEM" in
     xfs) apt-get install -y xfsprogs ;;
@@ -159,6 +163,7 @@ install_packages() {
   [[ -n "$CRYPT_DEVICE" ]] && { apt-get install -y systemd-cryptsetup || true; }
   [[ "$NTP_ENABLE" == "yes" ]] && apt-get install -y chrony
   [[ "$SPEEDTEST_ENABLE" == "yes" ]] && apt-get install -y speedtest-cli python3-matplotlib
+  [[ "$DLNA_ENABLE" == "yes" ]] && apt-get install -y minidlna
   if [[ "$DNS_ENABLE" == "yes" || "$DHCP_ENABLE" == "yes" ]]; then
     apt-get install -y dnsmasq curl
   fi
@@ -191,6 +196,7 @@ Opções:
   --ntp          Configura o servidor NTP (se NTP_ENABLE=yes)
   --dns          Configura o servidor DNS/DHCP com listas de bloqueio
   --speedtest    Instala o teste de velocidade da internet e seus timers
+  --dlna         Instala e configura o servidor DLNA (se DLNA_ENABLE=yes)
   --web          Instala o dashboard web com login (se WEB_ENABLE=yes)
   --ssh          Limita sessões SSH a SSH_MAX_SESSION segundos de inatividade
   --firewall     Configura o firewall para os serviços da rede local
@@ -787,6 +793,41 @@ EOF
   systemctl restart marcelinoWeb.service
 }
 
+setup_dlna() {
+  [[ "$DLNA_ENABLE" == "yes" ]] || return 0
+  log "Configurando servidor DLNA..."
+
+  mkdir -p "$DLNA_MEDIA_DIR/Movies" "$DLNA_MEDIA_DIR/Music" "$DLNA_MEDIA_DIR/Pictures" \
+    /var/cache/minidlna /var/log/minidlna
+  chgrp -R "$SAMBA_GROUP" "$DLNA_MEDIA_DIR" 2>/dev/null || true
+  chmod -R g+rX "$DLNA_MEDIA_DIR" 2>/dev/null || true
+
+  cp -n /etc/minidlna.conf /etc/minidlna.conf.orig 2>/dev/null || true
+  cat > /etc/minidlna.conf <<EOF
+# Gerado por nas-setup.sh
+media_dir=V,$DLNA_MEDIA_DIR/Movies
+media_dir=A,$DLNA_MEDIA_DIR/Music
+media_dir=P,$DLNA_MEDIA_DIR/Pictures
+friendly_name=$(hostname)-DLNA
+db_dir=/var/cache/minidlna
+log_dir=/var/log/minidlna
+inotify=yes
+port=8200
+notify_interval=60
+serial=12345678
+model_number=1
+strict_dlna=no
+root_container=.
+EOF
+
+  if id minidlna >/dev/null 2>&1; then
+    chown -R minidlna:minidlna /var/cache/minidlna /var/log/minidlna
+  fi
+
+  systemctl enable minidlna
+  systemctl restart minidlna
+}
+
 setup_ssh() {
   log "Configurando SSH: encerra sessões após $SSH_MAX_SESSION s de inatividade..."
   cat > /etc/profile.d/ssh-timeout.sh <<EOF
@@ -816,6 +857,8 @@ setup_firewall() {
   "$SBIN_DIR/ufw" allow from "$LAN_CIDR" to any port 5353 proto udp comment 'mDNS'
   "$SBIN_DIR/ufw" allow from "$LAN_CIDR" to any port 3702 proto udp comment 'WS-Discovery'
   "$SBIN_DIR/ufw" allow from "$LAN_CIDR" to any port 5357 proto tcp comment 'WSD HTTP'
+  [[ "$DLNA_ENABLE" == "yes" ]] && "$SBIN_DIR/ufw" allow from "$LAN_CIDR" to any port 8200 proto tcp comment 'DLNA'
+  [[ "$DLNA_ENABLE" == "yes" ]] && "$SBIN_DIR/ufw" allow from "$LAN_CIDR" to any port 1900 proto udp comment 'DLNA SSDP'
   [[ "$WEB_ENABLE" == "yes" ]] && "$SBIN_DIR/ufw" allow from "$LAN_CIDR" to any port "$WEB_PORT" proto tcp comment 'Dashboard web'
   [[ "$NTP_ENABLE" == "yes" ]] && "$SBIN_DIR/ufw" allow from "$LAN_CIDR" to any port 123 proto udp comment 'NTP'
   if [[ "$DNS_ENABLE" == "yes" ]]; then
@@ -857,6 +900,7 @@ while [[ $# -gt 0 ]]; do
     --ntp)       SELECTED_STEPS+=(ntp) ;;
     --dns)       SELECTED_STEPS+=(dns) ;;
     --speedtest) SELECTED_STEPS+=(speedtest) ;;
+    --dlna)      SELECTED_STEPS+=(dlna) ;;
     --web)       SELECTED_STEPS+=(web) ;;
     --ssh)       SELECTED_STEPS+=(ssh) ;;
     --firewall)  SELECTED_STEPS+=(firewall) ;;
@@ -890,12 +934,12 @@ if [[ "$NEEDS_LAN" == "yes" ]]; then
 fi
 
 if [[ "$RUN_ALL" == "yes" ]]; then
-  SELECTED_STEPS=(install network raid storage user samba discovery ntp dns speedtest web ssh firewall)
+  SELECTED_STEPS=(install network raid storage user samba discovery ntp dns speedtest dlna web ssh firewall)
 fi
 
 # Executa na ordem canônica, independentemente da ordem dos argumentos
 ORDERED_STEPS=()
-for s in install network raid storage user samba discovery ntp dns speedtest web ssh firewall; do
+for s in install network raid storage user samba discovery ntp dns speedtest dlna web ssh firewall; do
   for step in "${SELECTED_STEPS[@]}"; do
     [[ "$step" == "$s" ]] && ORDERED_STEPS+=("$s")
   done
@@ -914,6 +958,7 @@ for step in "${SELECTED_STEPS[@]}"; do
     ntp)       setup_ntp ;;
     dns)       setup_dns ;;
     speedtest) setup_speedtest ;;
+    dlna)      setup_dlna ;;
     web)       setup_web ;;
     ssh)       setup_ssh ;;
     firewall)  setup_firewall ;;
