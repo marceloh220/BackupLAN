@@ -18,10 +18,14 @@ IP_RANGE_END="192.168.0.200"       # fim do intervalo DHCP
 DNS_UPSTREAM=("1.1.1.1" "9.9.9.9") # resolvedores externos (Cloudflare e Quad9)
 LOCAL_DOMAIN="lan"                 # domínio local usado para configuração de rede e Samba
 
+# --- Armazenamentos ---
+APP_STORAGE="/srv/app"
+NAS_STORAGE="/srv/nas"
+
 # --- Usuário principal do NAS ---
-USER_NAME="meneceu"                # usuário principal do NAS
-USER_PASSWORD="sua_senha_aqui"     # senha do usuário principal do NAS
-USER_HOME="/srv/nas/$USER_NAME"    # diretório home do usuário principal do NAS (o share Samba usa o nome com a primeira letra maiúscula)
+USER_NAME="meneceu"                 # usuário principal do NAS
+USER_PASSWORD=""                    # senha do usuário principal; vazio = solicitar no terminal
+USER_HOME="$NAS_STORAGE/$USER_NAME" # diretório home do usuário principal do NAS (o share Samba usa o nome com a primeira letra maiúscula)
 
 # --- Sistema ---
 SBIN_DIR="/sbin"                    # diretório dos executáveis administrativos
@@ -33,19 +37,16 @@ RAID_DEVICE="/dev/md0"             # dispositivo RAID a ser criado
 
 # --- Sistema de arquivos sem criptografia ---
 # Usado somente quando CRYPT_DEVICE estiver vazio.
-RAID_MOUNTPOINT="/srv/nas"
+RAID_MOUNTPOINT="$NAS_STORAGE"
 
 # --- Sistema de arquivos do volume RAID (ou do volume dentro do LUKS) ---
 # Opções: ext4, xfs ou btrfs.
 RAID_FILESYSTEM="ext4"
 
-# --- Armazenamento de aplicativos ---
-APP_STORAGE="/srv/app"
-
 # --- Criptografia (LUKS) ---
 # Deixe CRYPT_DEVICE vazio para NÃO usar criptografia.
 CRYPT_DEVICE="/dev/md0"            # ex.: "/dev/md0" (ou outra partição/disco)
-CRYPT_MOUNTPOINT="/srv/nas"        # ponto de montagem do volume descriptografado
+CRYPT_MOUNTPOINT="$NAS_STORAGE"        # ponto de montagem do volume descriptografado
 CRYPT_KEYFILE="/etc/nas.key"       # ex.: "/root/nas.key". Vazio = não gera keyfile (senha digitada)
 CRYPT_AUTO_UNLOCK="yes"            # yes = descriptografa e monta no boot; no = manual
 CRYPT_NAME="nas_crypt"             # nome do mapeamento em /dev/mapper
@@ -53,10 +54,10 @@ CRYPT_NAME="nas_crypt"             # nome do mapeamento em /dev/mapper
 # --- Samba ---
 # Formato: "nome_do_share:/caminho/do/diretorio"
 SHARES=(
-  "Publico:/srv/nas/publico"
-  "Privado:/srv/nas/privado"
-  "Backup:/srv/nas/backup"
-  "Midia:/srv/nas/midia"
+  "Publico:$NAS_STORAGE/publico"
+  "Privado:$NAS_STORAGE/privado"
+  "Backup:$NAS_STORAGE/backup"
+  "Midia:$NAS_STORAGE/midia"
   "${USER_NAME^}:$USER_HOME"
   "Monitor:$APP_STORAGE/monitor"
   "Anytype:$APP_STORAGE/anytype"
@@ -127,12 +128,13 @@ WEB_TLS="yes"                                            # yes = gera certificad
 ANYTYPE_ENABLE="yes"
 ANYTYPE_IMAGE="ghcr.io/grishy/any-sync-bundle:1.7.0-2026-10-12"
 ANYTYPE_DATA="$APP_STORAGE/anytype"
+ANYTYPE_BACKUP="$NAS_STORAGE/backup/anytype"
 ANYTYPE_HOST="$NAS_IP"
 
 # --- DLNA (servidor de mídia) ---
 DLNA_ENABLE="yes"
 DLNA_PORT=8200
-DLNA_MEDIA_DIR="/srv/nas/midia"
+DLNA_MEDIA_DIR="$NAS_STORAGE/midia"
 DLNA_MEDIA_MUSIC="$DLNA_MEDIA_DIR/Music"
 DLNA_MEDIA_VIDEO="$DLNA_MEDIA_DIR/Video"
 DLNA_MEDIA_PICTURES="$DLNA_MEDIA_DIR/Pictures"
@@ -277,6 +279,17 @@ detect_wsdd_package() {
   WSDD_PKG=""
 }
 
+ensure_user_password() {
+  if [[ -z "$USER_PASSWORD" ]]; then
+    read -rsp "Senha para $USER_NAME: " USER_PASSWORD </dev/tty \
+      || die "Não foi possível ler a senha no terminal. Defina USER_PASSWORD para execução não interativa."
+    printf '\n' >&2
+  fi
+  [[ -n "$USER_PASSWORD" && "$USER_PASSWORD" != "sua_senha_aqui" ]] \
+    || die "Defina USER_PASSWORD no topo do script ou deixe vazio para solicitar no terminal."
+  [[ ${#USER_PASSWORD} -ge 8 ]] || die "USER_PASSWORD deve ter ao menos 8 caracteres."
+}
+
 setup_user() {
   [[ -z "${USER_READY:-}" ]] || return 0
   ensure_packages samba
@@ -289,9 +302,7 @@ setup_user() {
     create_samba_user="yes"
   fi
   if [[ "$create_user" == "yes" || "$create_samba_user" == "yes" ]]; then
-    [[ -n "$USER_PASSWORD" && "$USER_PASSWORD" != "sua_senha_aqui" ]] \
-      || die "Defina USER_PASSWORD no topo do script para cadastrar o usuário."
-    [[ ${#USER_PASSWORD} -ge 8 ]] || die "USER_PASSWORD deve ter ao menos 8 caracteres."
+    ensure_user_password
   fi
   log "Configurando usuário $USER_NAME..."
 
@@ -982,6 +993,7 @@ EOF
     log "Cadastrando o usuário web '$WEB_ADMIN'..."
     [[ "$WEB_ADMIN" == "$USER_NAME" ]] || die "WEB_ADMIN deve ser igual a USER_NAME ou ficar vazio."
     setup_user
+    ensure_user_password
     /usr/local/bin/marcelinoWeb users | grep -qx "$WEB_ADMIN" && web_cmd=passwd
     printf '%s\n' "$USER_PASSWORD" | /usr/local/bin/marcelinoWeb "$web_cmd" "$WEB_ADMIN" \
       || warn "Usuário web não cadastrado."
@@ -997,15 +1009,22 @@ EOF
 
 setup_anytype() {
   [[ "$ANYTYPE_ENABLE" == "yes" ]] || return 0
-  ensure_packages docker.io
+  ensure_packages docker.io tar gzip
   [[ "$ANYTYPE_DATA" == /* && "$ANYTYPE_DATA" != *[[:space:]\"\\%]* ]] \
     || die "ANYTYPE_DATA deve ser um caminho absoluto sem espaços, aspas, barras invertidas ou %."
+  [[ "$ANYTYPE_BACKUP" == /* && "$ANYTYPE_BACKUP" != *[[:space:]\"\\%]* ]] \
+    || die "ANYTYPE_BACKUP deve ser um caminho absoluto sem espaços, aspas, barras invertidas ou %."
+  local data_path backup_path
+  data_path="$(realpath -m -- "$ANYTYPE_DATA")"
+  backup_path="$(realpath -m -- "$ANYTYPE_BACKUP")"
+  [[ "$backup_path/" != "$data_path/"* ]] \
+    || die "ANYTYPE_BACKUP não pode ficar dentro de ANYTYPE_DATA."
   [[ -n "$ANYTYPE_HOST" && "$ANYTYPE_HOST" != *[[:space:]\"\\%]* ]] \
     || die "ANYTYPE_HOST inválido. Use o IP ou hostname acessível pela LAN."
   [[ "$ANYTYPE_IMAGE" =~ ^[a-zA-Z0-9./_:@-]+$ ]] || die "ANYTYPE_IMAGE inválida."
   log "Configurando sync host local do Anytype..."
   systemctl enable --now docker
-  install -d -o root -g root -m 0700 "$ANYTYPE_DATA"
+  install -d -o root -g root -m 0700 "$ANYTYPE_DATA" "$ANYTYPE_BACKUP"
   docker pull "$ANYTYPE_IMAGE"
 
   cat > /etc/systemd/system/nas-anytype.service <<EOF
@@ -1026,12 +1045,67 @@ ExecStop=/usr/bin/docker stop --time 120 nas-anytype
 [Install]
 WantedBy=multi-user.target
 EOF
+  cat > /usr/local/sbin/nas-anytype-backup <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+umask 077
+data_path="$1"
+backup_path="$2"
+temporary=""
+restart_service=no
+cleanup() {
+  local status=$?
+  trap - EXIT
+  [[ -z "$temporary" ]] || rm -f -- "$temporary" || status=$?
+  if [[ "$restart_service" == yes ]]; then
+    systemctl start nas-anytype.service || status=$?
+  fi
+  exit "$status"
+}
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+if systemctl is-active --quiet nas-anytype.service; then
+  restart_service=yes
+  systemctl stop nas-anytype.service
+fi
+temporary="$(mktemp "$backup_path/anytype-$(date -u +%Y%m%dT%H%M%SZ)-XXXXXX.tar.gz.tmp")"
+tar -czf "$temporary" -C "$data_path" .
+mv -- "$temporary" "${temporary%.tmp}"
+EOF
+  chmod 700 /usr/local/sbin/nas-anytype-backup
+  cat > /etc/systemd/system/nas-anytype-backup.service <<EOF
+[Unit]
+Description=Daily backup of Anytype data
+After=docker.service nas-anytype.service
+RequiresMountsFor="$ANYTYPE_DATA" "$ANYTYPE_BACKUP"
+
+[Service]
+Type=oneshot
+UMask=0077
+TimeoutStartSec=infinity
+TimeoutStopSec=180
+ExecStart=/usr/local/sbin/nas-anytype-backup "$ANYTYPE_DATA" "$ANYTYPE_BACKUP"
+EOF
+  cat > /etc/systemd/system/nas-anytype-backup.timer <<'EOF'
+[Unit]
+Description=Daily backup of Anytype data
+
+[Timer]
+OnCalendar=daily
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+EOF
   systemctl daemon-reload
   systemctl enable nas-anytype.service
   systemctl restart nas-anytype.service
+  systemctl enable --now nas-anytype-backup.timer
   firewall_allow tcp 33010 'NAS Anytype sync'
   firewall_allow udp 33020 'NAS Anytype QUIC'
   log "Anytype iniciado. Após a inicialização, importe $ANYTYPE_DATA/client-config.yml nos clientes."
+  log "Backup diário do Anytype habilitado em $ANYTYPE_BACKUP (nas-anytype-backup.timer)."
   warn "O endereço anunciado é persistido no primeiro início; alterações posteriores exigem editar bundle-config.yml."
 }
 
@@ -1189,8 +1263,13 @@ uninstall_web() {
 }
 
 uninstall_anytype() {
+  systemctl disable --now nas-anytype-backup.timer 2>/dev/null || true
+  systemctl stop nas-anytype-backup.service 2>/dev/null || true
   systemctl disable --now nas-anytype.service 2>/dev/null || true
-  rm -f /etc/systemd/system/nas-anytype.service
+  rm -f /etc/systemd/system/nas-anytype.service \
+    /etc/systemd/system/nas-anytype-backup.service \
+    /etc/systemd/system/nas-anytype-backup.timer \
+    /usr/local/sbin/nas-anytype-backup
   firewall_delete tcp 33010
   firewall_delete udp 33020
   systemctl daemon-reload
@@ -1206,7 +1285,7 @@ uninstall_anytype() {
   else
     purge_packages docker.io
   fi
-  log "Dados do Anytype preservados em $ANYTYPE_DATA."
+  log "Dados do Anytype preservados em $ANYTYPE_DATA e backups em $ANYTYPE_BACKUP."
 }
 
 uninstall_ssh() {

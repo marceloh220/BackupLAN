@@ -39,7 +39,7 @@ Cada opção de serviço instala suas dependências, configura o serviço e abre
 | `--speedtest` / `--uninstall-speedtest` | Instala/remove o comando e os timers de teste/gráfico; logs e gráficos existentes são preservados. |
 | `--marcelino-server` / `--uninstall-marcelino-server` | Instala/remove o agente de métricas, sem abrir portas; configuração e JSON existentes são preservados na remoção. |
 | `--web` / `--uninstall-web` | Instala/remove o dashboard e sua regra de firewall; usuários, certificados e configuração persistente são preservados. |
-| `--anytype` / `--uninstall-anytype` | Configura/remove o serviço Anytype em Docker; dados são preservados e Docker só é desabilitado/removido se não houver outros contêineres ativos. |
+| `--anytype` / `--uninstall-anytype` | Configura/remove o serviço Anytype em Docker e seu timer de backup diário; dados e backups são preservados e Docker só é desabilitado/removido se não houver outros contêineres ativos. |
 | `--ssh` / `--uninstall-ssh` | Instala/configura ou remove o servidor SSH, configurações gerenciadas e regra da porta `SSH_PORT`. A desinstalação encerra o acesso SSH remoto. |
 | `--dlna` / `--uninstall-dlna` | Instala/remove MiniDLNA e abre/fecha SSDP e a porta `DLNA_PORT`; mídia, banco/cache e logs são preservados. |
 | `--all` | Configura rede, RAID, armazenamento, usuário e todos os serviços, incluindo SSH e DLNA. Não executa desinstalações. |
@@ -54,7 +54,7 @@ As opções são editadas na seção **CONFIGURAÇÃO** no começo do script. Os
 - Aplicativos em `APP_STORAGE` (padrão `/srv/app`): Monitor, Anytype e banco/cache DLNA. Esse caminho não fica automaticamente no RAID nem dentro do LUKS; configure uma montagem própria ou use um caminho dentro do volume se precisar dessa proteção.
 - Shares `Publico`, `Privado`, `Backup`, `Midia`, `Monitor` e o share do usuário principal (`USER_NAME` com a primeira letra maiúscula).
 - `Publico` permite convidados; `Backup` e `Midia` usam o grupo `nasgroup`; `Privado` e o share do usuário são restritos a `USER_NAME`.
-- Usuário principal: `USER_NAME` e `USER_PASSWORD` (troque o valor `sua_senha_aqui`; mínimo 8 caracteres para novos cadastros). Contas Linux e Samba existentes mantêm suas senhas; se ambas já existirem, a etapa de usuário não exige uma nova senha. O dashboard usa `USER_PASSWORD` separadamente para o login web. A senha fica em texto puro no script; restrinja o acesso ao arquivo.
+- Usuário principal: `USER_NAME` e `USER_PASSWORD` (troque o valor `sua_senha_aqui`; mínimo 8 caracteres para novos cadastros). Se `USER_PASSWORD=""`, a senha será solicitada interativamente no terminal, sem exibir os caracteres digitados, quando necessária para cadastrar contas ou configurar o login web. Em execuções não interativas, preencha a variável previamente. Contas Linux e Samba existentes mantêm suas senhas; se ambas já existirem, a etapa de usuário não exige uma nova senha. O dashboard usa `USER_PASSWORD` separadamente para o login web. Se preenchida no script, a senha fica em texto puro; restrinja o acesso ao arquivo.
 - Grupo de trabalho `WORKGROUP`, domínio `lan` (`LOCAL_DOMAIN`), SSH na porta 22 e chrony habilitado.
 - Rede: `IP_INET`, `IP_GATEWAY`, `IP_RANGE_START`, `IP_RANGE_END`, `DNS_UPSTREAM` e `LOCAL_DOMAIN` ficam no topo do script e alimentam `NAS_IP`, `NET_GATEWAY`, a faixa DHCP e o domínio. Ajuste-os para a sua rede (o NAS, o gateway e a faixa DHCP devem estar na mesma sub-rede).
 
@@ -62,7 +62,7 @@ As opções são editadas na seção **CONFIGURAÇÃO** no começo do script. Os
 
 A etapa `--anytype` usa o projeto comunitário [any-sync-bundle](https://github.com/grishy/any-sync-bundle), não a stack oficial completa do Anytype. O contêiner reúne os serviços de sincronização e armazena os dados no NAS. A imagem all-in-one exige uma CPU compatível com seu MongoDB (AVX em x86_64).
 
-Revise `ANYTYPE_ENABLE` (padrão `yes`), `ANYTYPE_IMAGE` (versão fixada), `ANYTYPE_DATA` (padrão `/srv/app/anytype`) e `ANYTYPE_HOST` (padrão `NAS_IP`). Monte o armazenamento antes de configurar o serviço:
+Revise `ANYTYPE_ENABLE` (padrão `yes`), `ANYTYPE_IMAGE` (versão fixada), `ANYTYPE_DATA` (padrão `/srv/app/anytype`), `ANYTYPE_BACKUP` (padrão `/srv/nas/backup/anytype`) e `ANYTYPE_HOST` (padrão `NAS_IP`). O destino do backup não pode ficar dentro de `ANYTYPE_DATA`. Monte o armazenamento antes de configurar o serviço:
 
 ```bash
 sudo bash nas-setup.sh --anytype
@@ -76,7 +76,11 @@ Após a primeira inicialização, transfira com segurança `/srv/app/anytype/cli
 
 `ANYTYPE_HOST` define o endereço anunciado apenas no primeiro início. Para mudar esse endereço posteriormente, edite `externalAddr` em `bundle-config.yml`, reinicie `nas-anytype.service` e importe novamente o `client-config.yml` gerado nos dispositivos.
 
-Faça backup de todo `ANYTYPE_DATA`, incluindo `bundle-config.yml`, com o serviço parado de forma limpa (`sudo systemctl stop nas-anytype.service`). Confira nos logs `bundle_shutdown_complete` antes de copiar e inicie novamente com `sudo systemctl start nas-anytype.service`. Não apague esse diretório ao atualizar a imagem. Definir `ANYTYPE_ENABLE=no` pula a configuração e as liberações futuras; para parar uma instalação existente, execute também `sudo systemctl disable --now nas-anytype.service`.
+O timer `nas-anytype-backup.timer` faz backup diário à meia-noite (horário local) de todo `ANYTYPE_DATA`, incluindo `bundle-config.yml`, em arquivos `anytype-*.tar.gz` dentro de `ANYTYPE_BACKUP`, restritos ao root. O serviço é parado durante a compactação e reiniciado ao final, inclusive em caso de falha; se já estiver parado, permanece assim. Backups interrompidos não são publicados como arquivos completos. Com `Persistent=true`, uma execução perdida é disparada quando o timer voltar a ficar ativo. Os arquivos são acumulados sem exclusão automática; monitore o espaço disponível.
+
+Para executar um backup manualmente, use `sudo systemctl start nas-anytype-backup.service`. Consulte o agendamento com `systemctl list-timers nas-anytype-backup.timer` e os logs com `sudo journalctl -u nas-anytype-backup.service`. O uninstall remove o timer, o serviço de backup e o script auxiliar, preservando os dados e os backups existentes.
+
+Não apague `ANYTYPE_DATA` ao atualizar a imagem. Definir `ANYTYPE_ENABLE=no` apenas pula a configuração futura; para parar uma instalação existente e seu agendamento, execute também `sudo systemctl disable --now nas-anytype-backup.timer nas-anytype.service`.
 
 ### DLNA
 
