@@ -32,6 +32,7 @@ import time
 from http import cookies
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from typing import cast
 from urllib.parse import parse_qs
 
 DEFAULT_USERS = "/etc/marcelinoWeb/users.json"
@@ -324,7 +325,9 @@ function render(s) {
   ]));
   main.append(sec('Discos (SMART)', table(dRows)));
   main.append(sec('Compartilhamentos Samba', table([['Nome', 'Caminho']].concat(
-    (s.samba_shares || []).map(x => [x.name, x.path])))));
+        (s.samba_shares || [])
+            .filter(x => !['no', 'false', '0'].includes(String(x.browseable ?? '').trim().toLowerCase()))
+            .map(x => [x.name, x.path])))));
   const dns = s.dns_dhcp || {};
   main.append(sec('DNS / DHCP', kv([
     ['Serviço', dns.service_state], ['DNS', dns.dns_enabled ? 'ativo' : 'inativo'],
@@ -397,7 +400,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def _cookie(self, value, max_age):
         flags = f"{COOKIE_NAME}={value}; Path=/; HttpOnly; SameSite=Strict; Max-Age={max_age}"
-        if self.server.tls:
+        if cast("Server", self.server).tls:
             flags += "; Secure"
         return ("Set-Cookie", flags)
 
@@ -424,7 +427,7 @@ class Handler(BaseHTTPRequestHandler):
             if path == "/api/me":
                 return self._send(200, json.dumps({"user": user}), "application/json")
             try:
-                with open(self.server.status_path, encoding="utf-8") as handle:
+                with open(cast("Server", self.server).status_path, encoding="utf-8") as handle:
                     body = handle.read()
                 json.loads(body)
             except (OSError, ValueError):
@@ -456,7 +459,7 @@ class Handler(BaseHTTPRequestHandler):
                 "__ERROR__", '<p class="err">Muitas tentativas. Aguarde alguns minutos.</p>'))
         username = (form.get("username") or [""])[0]
         password = (form.get("password") or [""])[0]
-        record = self.server.users().get(username)
+        record = cast("Server", self.server).users().get(username)
         valid = _verify_password(password, record or _DUMMY_HASH)
         if record is None or not valid:
             _register_failure(ip)

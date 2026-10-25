@@ -1,8 +1,12 @@
 #!/usr/bin/fish
 
 set -U fish_greeting ""
-echo "zoxide init fish | source" >> ~/.config/fish/config.fish
-echo "whatthedouchsay" >> ~/.config/fish/config.fish
+cat > ~/.config/fish/config.fish << EOF
+if status --is-interactive
+    zoxide init fish | source
+    whatthedouchsay
+end
+EOF
 
 # lsd aliases
 alias --save ls='lsd --group-directories-first'
