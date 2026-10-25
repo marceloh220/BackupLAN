@@ -12,6 +12,9 @@ IP_INET="192.168.0.1"              # endereço IP da interface de rede do NAS
 IP_GATEWAY="192.168.0.254"         # gateway/roteador de internet da interface de rede do NAS
 IP_RANGE_START="192.168.0.100"     # início do intervalo DHCP
 IP_RANGE_END="192.168.0.200"       # fim do intervalo DHCP
+LAN_NETMASK="255.255.255.0"        # máscara de rede local do NAS
+LAN_CIDR=""                        # rede local em formato CIDR, empty = será calculado a partir de LAN_NETMASK
+LAN_INTERFACE="eth0"               # interface de rede local do NAS
 DNS_UPSTREAM=("1.1.1.1" "9.9.9.9") # resolvedores externos (Cloudflare e Quad9)
 LOCAL_DOMAIN="lan"                 # domínio local usado para configuração de rede e Samba
 
@@ -53,12 +56,15 @@ SHARES=(
   "Midia:/srv/nas/midia"
   "${USER_NAME^}:$USER_HOME"
   "Monitor:/srv/nas/monitor"
+  "Anytype:/srv/nas/anytype"
 )
 PUBLIC_SHARES=("Publico")                          # nomes de shares acessíveis sem senha (guest)
 GROUP_SHARES=("Backup" "Midia")                    # shares acessíveis ao grupo SAMBA_GROUP
 READONLY_SHARES=("Monitor")                        # shares visíveis, somente leitura (gravados localmente pelo marcelinoServer)
-USER_SHARES=("${USER_NAME^}:$USER_NAME" "Privado:$USER_NAME")  # pares share:usuario acessíveis somente por esse usuário
-SAMBA_USER="$USER_NAME"                               # usuário Samba (criado se não existir)
+USER_SHARES=("${USER_NAME^}:$USER_NAME" 
+             "Privado:$USER_NAME" 
+             "Anytype:$USER_NAME")                 # pares share:usuario acessíveis somente por esse usuário
+SAMBA_USER="$USER_NAME"                            # usuário Samba (criado se não existir)
 SAMBA_GROUP="nasgroup"                             # grupo Samba (criado se não existir)
 WORKGROUP="WORKGROUP"                              # grupo de trabalho do Samba
 DOMAIN="$LOCAL_DOMAIN"                             # domínio da rede local (para Samba)
@@ -89,10 +95,12 @@ DHCP_RANGE_START="$IP_RANGE_START"
 DHCP_RANGE_END="$IP_RANGE_END"
 DHCP_LEASE="12h"
 
-# --- Rede / Firewall ---
-LAN_CIDR=""                        # ex.: "192.168.1.0/24". Vazio = deriva de NAS_IP/NAS_PREFIX (ou detecta)
+# --- SSH (Secure Shell) ---
 SSH_PORT=22                        # porta SSH do servidor NAS
 SSH_MAX_SESSION=600                # segundos de inatividade até encerrar a sessão SSH (10 min)
+SSH_ALLOW_ROOT="no"                # yes = permite login SSH como root, no = apenas usuários normais
+SSH_PASSWORD_AUTH="yes"            # yes = permite autenticação por senha, no = apenas chaves SSH
+SSH_BANNER="yes"                   # mensagem exibida no login SSH (opcional)
 
 # --- NTP (servidor de horário para a rede local) ---
 NTP_ENABLE="yes"                              # yes = instala e configura o chrony como servidor NTP da LAN
@@ -112,6 +120,23 @@ WEB_USER="marcelinoweb"                                  # usuário de sistema q
 WEB_ADMIN="$USER_NAME"                                   # usuário web inicial (usa USER_PASSWORD; vazio = cadastre depois com marcelinoWeb useradd)
 WEB_TLS="yes"                                            # yes = gera certificado autoassinado e usa HTTPS
 
+# --- Anytype (sync host local) ---
+ANYTYPE_ENABLE="yes"
+ANYTYPE_IMAGE="ghcr.io/grishy/any-sync-bundle:1.7.0-2026-10-12"
+ANYTYPE_DATA="/srv/nas/anytype"
+ANYTYPE_HOST="$NAS_IP"
+
+# --- DLNA (servidor de mídia) ---
+DLNA_ENABLE="yes"
+DLNA_PORT=8200
+DLNA_MEDIA_DIR="/srv/nas/midia"
+DLNA_MEDIA_MUSIC="$DLNA_MEDIA_DIR/Music"
+DLNA_MEDIA_VIDEO="$DLNA_MEDIA_DIR/Video"
+DLNA_MEDIA_PICTURES="$DLNA_MEDIA_DIR/Pictures"
+DLNA_CACHE="/srv/nas/midia/.dlna.cache"
+DLNA_DB="/srv/nas/midia/.dlna.db"
+DLNA_LOG="/var/log/minidlna/minidlna.log"
+
 ###############################################################################
 # FUNÇÕES
 ###############################################################################
@@ -128,76 +153,114 @@ validate_raid_filesystem() {
 }
 
 detect_iface() {
+  [[ -n "$NET_IFACE" ]] || NET_IFACE="$LAN_INTERFACE"
   [[ -n "$NET_IFACE" ]] || NET_IFACE=$(ip -4 route show default | awk '{print $5; exit}')
   [[ -n "$NET_IFACE" ]] || die "Interface padrão não encontrada; defina NET_IFACE."
 }
 
 detect_lan_cidr() {
-  if [[ "$NET_STATIC" == "yes" ]]; then
-    python3 -c "import sys,ipaddress; print(ipaddress.ip_interface(sys.argv[1]).network)" "$NAS_IP/$NAS_PREFIX"
+  if [[ -n "$LAN_CIDR" ]]; then
+    printf '%s\n' "$LAN_CIDR"
     return
   fi
-  local iface
-  iface=$(ip -4 route show default | awk '{print $5; exit}')
-  [[ -n "$iface" ]] || die "Interface padrão não encontrada; defina LAN_CIDR."
-  ip -4 -o addr show dev "$iface" scope global | awk '{print $4; exit}' |
+  detect_iface
+  if [[ "$NET_STATIC" == "yes" ]]; then
+    python3 -c "import sys,ipaddress; print(ipaddress.ip_interface(sys.argv[1]).network)" "$IP_INET/$LAN_NETMASK"
+    return
+  fi
+  ip -4 -o addr show dev "$NET_IFACE" scope global | awk '{print $4; exit}' |
     python3 -c "import sys,ipaddress; print(ipaddress.ip_interface(sys.stdin.read().strip()).network)"
 }
 
-install_packages() {
-  log "Instalando pacotes..."
+APT_UPDATED="no"
+FIREWALL_READY="no"
+
+ensure_packages() {
   export DEBIAN_FRONTEND=noninteractive
-  apt-get update -qq
-  apt-get install -y mdadm samba avahi-daemon ufw python3 python3-psutil smartmontools pciutils fontconfig e2fsprogs util-linux sudo
-  [[ "$WEB_ENABLE" == "yes" && "$WEB_TLS" == "yes" ]] && apt-get install -y openssl
-  case "$RAID_FILESYSTEM" in
-    xfs) apt-get install -y xfsprogs ;;
-    btrfs) apt-get install -y btrfs-progs ;;
-  esac
-  [[ -n "$CRYPT_DEVICE" ]] && apt-get install -y cryptsetup
-  # No Debian 13+ o gerador do crypttab fica em pacote separado; em versões antigas ele não existe.
-  [[ -n "$CRYPT_DEVICE" ]] && { apt-get install -y systemd-cryptsetup || true; }
-  [[ "$NTP_ENABLE" == "yes" ]] && apt-get install -y chrony
-  [[ "$SPEEDTEST_ENABLE" == "yes" ]] && apt-get install -y speedtest-cli python3-matplotlib
-  if [[ "$DNS_ENABLE" == "yes" || "$DHCP_ENABLE" == "yes" ]]; then
-    apt-get install -y dnsmasq curl
+  if [[ "$APT_UPDATED" != "yes" ]]; then
+    apt-get update -qq
+    APT_UPDATED="yes"
   fi
-  # Nome do pacote WS-Discovery varia entre versões do Debian
-  local p
-  for p in wsdd-server wsdd wsdd2; do
-    if apt-get install -y "$p"; then
-      WSDD_PKG="$p"
-      return
+  apt-get install -y "$@"
+}
+
+purge_packages() {
+  local package
+  local -a installed=()
+  for package in "$@"; do
+    if dpkg-query -W -f='${db:Status-Status}' "$package" 2>/dev/null | grep -qx installed; then
+      installed+=("$package")
     fi
-    warn "Pacote $p indisponível; tentando o próximo."
   done
-  warn "Nenhum pacote wsdd encontrado; Windows pode não listar o servidor automaticamente."
-  WSDD_PKG=""
+  if [[ ${#installed[@]} -gt 0 ]]; then
+    DEBIAN_FRONTEND=noninteractive apt-get purge -y "${installed[@]}"
+  fi
+}
+
+ensure_firewall() {
+  ensure_packages ufw
+  [[ "$FIREWALL_READY" != "yes" ]] || return 0
+  "$SBIN_DIR/ufw" default deny incoming
+  "$SBIN_DIR/ufw" default allow outgoing
+  if systemctl is-active --quiet ssh \
+    || systemctl is-active --quiet sshd; then
+    "$SBIN_DIR/ufw" allow from "$LAN_CIDR" to any port "$SSH_PORT" proto tcp comment 'NAS SSH'
+  fi
+  FIREWALL_READY="yes"
+}
+
+firewall_allow() {
+  local protocol=$1 port=$2 comment=$3
+  ensure_firewall
+  "$SBIN_DIR/ufw" allow from "$LAN_CIDR" to any port "$port" proto "$protocol" comment "$comment"
+  "$SBIN_DIR/ufw" --force enable
+}
+
+firewall_delete() {
+  local protocol=$1 port=$2
+  command -v ufw >/dev/null 2>&1 || return 0
+  "$SBIN_DIR/ufw" --force delete allow from "$LAN_CIDR" to any port "$port" proto "$protocol" >/dev/null 2>&1 || true
+}
+
+firewall_allow_dhcp() {
+  ensure_firewall
+  detect_iface
+  "$SBIN_DIR/ufw" allow in on "$NET_IFACE" to any port 67 proto udp comment 'NAS DHCP'
+  "$SBIN_DIR/ufw" --force enable
+}
+
+firewall_delete_dhcp() {
+  command -v ufw >/dev/null 2>&1 || return 0
+  detect_iface
+  "$SBIN_DIR/ufw" --force delete allow in on "$NET_IFACE" to any port 67 proto udp >/dev/null 2>&1 || true
 }
 
 show_help() {
   cat <<EOF
 Uso: sudo $0 [opção ...]
 
-Opções:
-  --all          Executa todas as etapas na ordem recomendada
-  --install      Instala os pacotes necessários
-  --raid         Cria e configura o RAID
-  --storage      Configura o sistema de arquivos e a criptografia/montagem
-  --user         Cria o usuário principal (USER_NAME) no sistema e no Samba
-  --samba        Configura usuários, permissões e compartilhamentos Samba
-  --discovery    Ativa descoberta de rede via Avahi e WS-Discovery
-  --network      Configura o IP estático (NAS_IP)
-  --ntp          Configura o servidor NTP (se NTP_ENABLE=yes)
-  --dns          Configura o servidor DNS/DHCP com listas de bloqueio
-  --speedtest    Instala o teste de velocidade da internet e seus timers
-  --web          Instala o dashboard web com login (se WEB_ENABLE=yes)
-  --ssh          Limita sessões SSH a SSH_MAX_SESSION segundos de inatividade
-  --firewall     Configura o firewall para os serviços da rede local
-  -h, --help     Mostra esta ajuda
+Opções gerais:
+  --all              Configura o NAS completo, incluindo RAID e armazenamento
+  --raid             Cria e configura o RAID
+  --storage          Configura sistema de arquivos e criptografia/montagem
+  --user             Cria o usuário principal (USER_NAME) no sistema e no Samba
+  --network          Configura o IP estático (NAS_IP)
 
-Sem opções, mostra esta ajuda. É possível combinar etapas; elas serão
-executadas na ordem acima, independentemente da ordem dos argumentos.
+Serviços:
+  --samba / --uninstall-samba
+  --discovery / --uninstall-discovery
+  --ntp / --uninstall-ntp
+  --dns / --uninstall-dns       DNS e DHCP (dnsmasq)
+  --speedtest / --uninstall-speedtest
+  --web / --uninstall-web
+  --anytype / --uninstall-anytype
+  --ssh / --uninstall-ssh
+  --dlna / --uninstall-dlna
+  -h, --help                    Mostra esta ajuda
+
+Cada serviço instala suas dependências e configura suas regras do firewall.
+As desinstalações preservam dados e não alteram RAID, discos, LUKS ou montagem.
+É possível combinar opções; --all não pode ser combinado com desinstalações.
 EOF
 }
 
@@ -214,6 +277,7 @@ detect_wsdd_package() {
 
 setup_user() {
   [[ -z "${USER_READY:-}" ]] || return 0
+  ensure_packages samba
   [[ -n "$USER_NAME" ]] || die "USER_NAME vazio."
   [[ "$USER_NAME" =~ ^[a-z_][a-z0-9_-]{0,31}$ ]] || die "USER_NAME inválido: $USER_NAME."
   [[ -n "$USER_PASSWORD" && "$USER_PASSWORD" != "sua_senha_aqui" ]] \
@@ -235,6 +299,7 @@ setup_user() {
 }
 
 setup_raid() {
+  ensure_packages mdadm
   if [[ -e "$RAID_DEVICE" ]]; then
     warn "$RAID_DEVICE já existe; pulando criação do RAID."
     return
@@ -282,6 +347,15 @@ format_raid_filesystem() {
 }
 
 setup_storage() {
+  ensure_packages e2fsprogs util-linux
+  case "$RAID_FILESYSTEM" in
+    xfs) ensure_packages xfsprogs ;;
+    btrfs) ensure_packages btrfs-progs ;;
+  esac
+  if [[ -n "$CRYPT_DEVICE" ]]; then
+    ensure_packages cryptsetup
+    ensure_packages systemd-cryptsetup || true
+  fi
   if [[ -z "$CRYPT_DEVICE" ]]; then
     log "Criptografia desativada; preparando $RAID_DEVICE em $RAID_FILESYSTEM."
     format_raid_filesystem "$RAID_DEVICE"
@@ -342,6 +416,7 @@ setup_storage() {
 }
 
 setup_samba() {
+  ensure_packages samba
   log "Configurando Samba..."
   getent group "$SAMBA_GROUP" >/dev/null || "$SBIN_DIR/groupadd" "$SAMBA_GROUP"
   setup_user
@@ -476,9 +551,24 @@ EOF
   testparm -s >/dev/null
   systemctl enable --now smbd nmbd
   systemctl restart smbd nmbd
+  firewall_allow tcp 139 'NAS Samba NetBIOS'
+  firewall_allow tcp 445 'NAS Samba SMB'
+  firewall_allow udp 137 'NAS Samba NetBIOS'
+  firewall_allow udp 138 'NAS Samba NetBIOS'
 }
 
 setup_discovery() {
+  ensure_packages avahi-daemon
+  local package
+  WSDD_PKG=""
+  for package in wsdd-server wsdd wsdd2; do
+    if ensure_packages "$package"; then
+      WSDD_PKG="$package"
+      break
+    fi
+    warn "Pacote $package indisponível; tentando o próximo."
+  done
+  [[ -n "$WSDD_PKG" ]] || warn "Nenhum pacote wsdd encontrado; Windows pode não listar o servidor automaticamente."
   log "Ativando descoberta (mDNS/Avahi e WS-Discovery)..."
   cat > /etc/avahi/services/smb.service <<'EOF'
 <?xml version="1.0" standalone='no'?>
@@ -502,10 +592,14 @@ EOF
     esac
     systemctl enable --now "$svc" || warn "Não foi possível iniciar $svc."
   fi
+  firewall_allow udp 5353 'NAS mDNS'
+  firewall_allow udp 3702 'NAS WS-Discovery'
+  firewall_allow tcp 5357 'NAS WS-Discovery HTTP'
 }
 
 setup_network() {
   [[ "$NET_STATIC" == "yes" ]] || return 0
+  ensure_packages iproute2 python3
   detect_iface
   local gw="$NET_GATEWAY"
   [[ -n "$gw" ]] || gw=$(ip -4 route show default | awk '{print $3; exit}')
@@ -592,13 +686,21 @@ EOF
 
 setup_dns() {
   [[ "$DNS_ENABLE" == "yes" || "$DHCP_ENABLE" == "yes" ]] || return 0
+  ensure_packages dnsmasq curl
   detect_iface
   local gw="$NET_GATEWAY"
   [[ -n "$gw" ]] || gw=$(ip -4 route show default | awk '{print $3; exit}')
   log "Configurando dnsmasq (DNS: $DNS_ENABLE, DHCP: $DHCP_ENABLE)..."
 
-  # systemd-resolved ocupa a porta 53
-  systemctl disable --now systemd-resolved 2>/dev/null || true
+  if [[ "$DNS_ENABLE" == "yes" ]]; then
+    # systemd-resolved ocupa a porta 53
+    if systemctl is-enabled --quiet systemd-resolved 2>/dev/null \
+      || systemctl is-active --quiet systemd-resolved 2>/dev/null; then
+      mkdir -p /etc/nas-setup
+      touch /etc/nas-setup/systemd-resolved.was-enabled
+    fi
+    systemctl disable --now systemd-resolved 2>/dev/null || true
+  fi
 
   {
     echo "# Gerado por nas-setup.sh"
@@ -637,6 +739,11 @@ setup_dns() {
   awk '$1 !~ /^127\./ && $1 != "::1" { print }' /etc/hosts > /var/lib/nas-dns/hosts
   touch /var/lib/nas-dns/blocklist.hosts
   if [[ "$DNS_ENABLE" == "yes" ]]; then
+    mkdir -p /etc/nas-setup
+    if [[ ! -e /etc/nas-setup/resolv.conf.orig && -e /etc/resolv.conf ]]; then
+      cp -a /etc/resolv.conf /etc/nas-setup/resolv.conf.orig
+    fi
+    touch /etc/nas-setup/dns-enabled
     update_blocklist_script
     log "Baixando listas de bloqueio..."
     /usr/local/sbin/update-dns-blocklist || warn "Falha ao baixar as listas."
@@ -649,11 +756,29 @@ setup_dns() {
   dnsmasq --test || die "Configuração do dnsmasq inválida."
   systemctl enable dnsmasq
   systemctl restart dnsmasq
+  if [[ "$DNS_ENABLE" == "yes" ]]; then
+    firewall_allow tcp 53 'NAS DNS TCP'
+    firewall_allow udp 53 'NAS DNS UDP'
+  else
+    firewall_delete tcp 53
+    firewall_delete udp 53
+  fi
+  if [[ "$DHCP_ENABLE" == "yes" ]]; then
+    firewall_allow_dhcp
+  else
+    firewall_delete_dhcp
+  fi
 }
 
 setup_ntp() {
   [[ "$NTP_ENABLE" == "yes" ]] || return 0
+  ensure_packages chrony
   log "Configurando servidor NTP (chrony) para $LAN_CIDR..."
+  if systemctl is-enabled --quiet systemd-timesyncd 2>/dev/null \
+    || systemctl is-active --quiet systemd-timesyncd 2>/dev/null; then
+    mkdir -p /etc/nas-setup
+    touch /etc/nas-setup/systemd-timesyncd.was-enabled
+  fi
   systemctl disable --now systemd-timesyncd 2>/dev/null || true
 
   {
@@ -671,10 +796,12 @@ EOF
 
   systemctl enable chrony
   systemctl restart chrony
+  firewall_allow udp 123 'NAS NTP'
 }
 
 setup_speedtest() {
   [[ "$SPEEDTEST_ENABLE" == "yes" ]] || return 0
+  ensure_packages python3 speedtest-cli python3-matplotlib
   local src
   src="$(dirname "$(readlink -f "$0")")/nas-speedtest.py"
   [[ -f "$src" ]] || die "$src não encontrado."
@@ -735,6 +862,8 @@ EOF
 
 setup_web() {
   [[ "$WEB_ENABLE" == "yes" ]] || return 0
+  ensure_packages python3 sudo
+  [[ "$WEB_TLS" != "yes" ]] || ensure_packages openssl
   local dir src tls_args=""
   dir="$(dirname "$(readlink -f "$0")")"
   src="$dir/marcelinoWeb.py"
@@ -785,10 +914,52 @@ EOF
   systemctl daemon-reload
   systemctl enable marcelinoWeb.service
   systemctl restart marcelinoWeb.service
+  firewall_allow tcp "$WEB_PORT" 'NAS dashboard web'
+}
+
+setup_anytype() {
+  [[ "$ANYTYPE_ENABLE" == "yes" ]] || return 0
+  ensure_packages docker.io
+  [[ "$ANYTYPE_DATA" == /* && "$ANYTYPE_DATA" != *[[:space:]\"\\%]* ]] \
+    || die "ANYTYPE_DATA deve ser um caminho absoluto sem espaços, aspas, barras invertidas ou %."
+  [[ -n "$ANYTYPE_HOST" && "$ANYTYPE_HOST" != *[[:space:]\"\\%]* ]] \
+    || die "ANYTYPE_HOST inválido. Use o IP ou hostname acessível pela LAN."
+  [[ "$ANYTYPE_IMAGE" =~ ^[a-zA-Z0-9./_:@-]+$ ]] || die "ANYTYPE_IMAGE inválida."
+  log "Configurando sync host local do Anytype..."
+  systemctl enable --now docker
+  install -d -o root -g root -m 0700 "$ANYTYPE_DATA"
+  docker pull "$ANYTYPE_IMAGE"
+
+  cat > /etc/systemd/system/nas-anytype.service <<EOF
+[Unit]
+Description=Anytype local sync host (any-sync-bundle)
+Requires=docker.service
+After=docker.service network-online.target
+Wants=network-online.target
+RequiresMountsFor="$ANYTYPE_DATA"
+
+[Service]
+Restart=on-failure
+RestartSec=10
+TimeoutStopSec=150
+ExecStart=/usr/bin/docker run --rm --name nas-anytype --network host --stop-timeout 120 --env "ANY_SYNC_BUNDLE_INIT_EXTERNAL_ADDRS=$ANYTYPE_HOST" --volume "$ANYTYPE_DATA:/data" $ANYTYPE_IMAGE
+ExecStop=/usr/bin/docker stop --time 120 nas-anytype
+
+[Install]
+WantedBy=multi-user.target
+EOF
+  systemctl daemon-reload
+  systemctl enable nas-anytype.service
+  systemctl restart nas-anytype.service
+  firewall_allow tcp 33010 'NAS Anytype sync'
+  firewall_allow udp 33020 'NAS Anytype QUIC'
+  log "Anytype iniciado. Após a inicialização, importe $ANYTYPE_DATA/client-config.yml nos clientes."
+  warn "O endereço anunciado é persistido no primeiro início; alterações posteriores exigem editar bundle-config.yml."
 }
 
 setup_ssh() {
-  log "Configurando SSH: encerra sessões após $SSH_MAX_SESSION s de inatividade..."
+  ensure_packages openssh-server
+  log "Configurando SSH na porta $SSH_PORT..."
   cat > /etc/profile.d/ssh-timeout.sh <<EOF
 # Gerado por nas-setup.sh
 TMOUT=$SSH_MAX_SESSION
@@ -797,38 +968,175 @@ export TMOUT
 EOF
   chmod 644 /etc/profile.d/ssh-timeout.sh
   mkdir -p /etc/ssh/sshd_config.d
-  cat > /etc/ssh/sshd_config.d/10-timeout.conf <<EOF
+  local root_login=no banner=none
+  [[ "$SSH_ALLOW_ROOT" != "yes" ]] || root_login=yes
+  [[ "$SSH_BANNER" != "yes" ]] || banner=/etc/issue.net
+  cat > /etc/ssh/sshd_config.d/10-nas-setup.conf <<EOF
+Port $SSH_PORT
+PermitRootLogin $root_login
+PasswordAuthentication $SSH_PASSWORD_AUTH
+Banner $banner
 ClientAliveInterval 60
 ClientAliveCountMax 3
 EOF
-  systemctl reload ssh 2>/dev/null || systemctl reload sshd
+  /usr/sbin/sshd -t
+  firewall_allow tcp "$SSH_PORT" 'NAS SSH'
+  systemctl enable --now ssh
+  systemctl reload ssh
 }
 
-setup_firewall() {
-  log "Configurando firewall (ufw) para $LAN_CIDR..."
-  "$SBIN_DIR/ufw" --force reset >/dev/null
-  "$SBIN_DIR/ufw" default deny incoming
-  "$SBIN_DIR/ufw" default allow outgoing
+setup_dlna() {
+  [[ "$DLNA_ENABLE" == "yes" ]] || return 0
+  ensure_packages minidlna
+  local storage_mountpoint="$RAID_MOUNTPOINT"
+  [[ -z "$CRYPT_DEVICE" ]] || storage_mountpoint="$CRYPT_MOUNTPOINT"
+  mountpoint -q "$storage_mountpoint" || die "Armazenamento não montado em $storage_mountpoint; monte-o antes de configurar DLNA."
+  [[ "$DLNA_PORT" =~ ^[0-9]+$ && "$DLNA_PORT" -ge 1 && "$DLNA_PORT" -le 65535 ]] \
+    || die "DLNA_PORT inválida: $DLNA_PORT."
+  getent group "$SAMBA_GROUP" >/dev/null || "$SBIN_DIR/groupadd" "$SAMBA_GROUP"
+  id minidlna >/dev/null 2>&1 && "$SBIN_DIR/usermod" -aG "$SAMBA_GROUP" minidlna
+  install -d -o root -g "$SAMBA_GROUP" -m 2770 \
+    "$DLNA_MEDIA_MUSIC" "$DLNA_MEDIA_VIDEO" "$DLNA_MEDIA_PICTURES" "$DLNA_CACHE" "$DLNA_DB"
+  detect_iface
+  install -d -o minidlna -g minidlna -m 0750 "$(dirname "$DLNA_LOG")"
+  cat > /etc/minidlna.conf <<EOF
+port=$DLNA_PORT
+network_interface=$NET_IFACE
+friendly_name=$(hostname) NAS
+media_dir=A,$DLNA_MEDIA_MUSIC
+media_dir=V,$DLNA_MEDIA_VIDEO
+media_dir=P,$DLNA_MEDIA_PICTURES
+db_dir=$DLNA_DB
+log_dir=$(dirname "$DLNA_LOG")
+inotify=yes
+EOF
+  systemctl enable --now minidlna
+  systemctl restart minidlna
+  firewall_allow udp 1900 'NAS DLNA SSDP'
+  firewall_allow tcp "$DLNA_PORT" 'NAS DLNA HTTP'
+}
 
-  "$SBIN_DIR/ufw" allow from "$LAN_CIDR" to any port "$SSH_PORT" proto tcp comment 'SSH'
-  "$SBIN_DIR/ufw" allow from "$LAN_CIDR" to any port 139,445 proto tcp comment 'Samba'
-  "$SBIN_DIR/ufw" allow from "$LAN_CIDR" to any port 137,138 proto udp comment 'NetBIOS'
-  "$SBIN_DIR/ufw" allow from "$LAN_CIDR" to any port 5353 proto udp comment 'mDNS'
-  "$SBIN_DIR/ufw" allow from "$LAN_CIDR" to any port 3702 proto udp comment 'WS-Discovery'
-  "$SBIN_DIR/ufw" allow from "$LAN_CIDR" to any port 5357 proto tcp comment 'WSD HTTP'
-  [[ "$WEB_ENABLE" == "yes" ]] && "$SBIN_DIR/ufw" allow from "$LAN_CIDR" to any port "$WEB_PORT" proto tcp comment 'Dashboard web'
-  [[ "$NTP_ENABLE" == "yes" ]] && "$SBIN_DIR/ufw" allow from "$LAN_CIDR" to any port 123 proto udp comment 'NTP'
-  if [[ "$DNS_ENABLE" == "yes" ]]; then
-    "$SBIN_DIR/ufw" allow from "$LAN_CIDR" to any port 53 comment 'DNS'
+uninstall_samba() {
+  systemctl disable --now smbd nmbd 2>/dev/null || true
+  firewall_delete tcp 139,445
+  firewall_delete udp 137,138
+  firewall_delete tcp 139
+  firewall_delete tcp 445
+  firewall_delete udp 137
+  firewall_delete udp 138
+  purge_packages samba
+  if [[ -f /etc/samba/smb.conf.orig ]]; then
+    install -d /etc/samba
+    cp -a /etc/samba/smb.conf.orig /etc/samba/smb.conf
   fi
-  if [[ "$DHCP_ENABLE" == "yes" ]]; then
-    detect_iface
-    # Clientes DHCP ainda não têm IP, então a origem não pode ser filtrada
-    "$SBIN_DIR/ufw" allow in on "$NET_IFACE" to any port 67 proto udp comment 'DHCP'
-  fi
+  systemctl daemon-reload
+}
 
-  "$SBIN_DIR/ufw" --force enable
-  "$SBIN_DIR/ufw" status verbose
+uninstall_discovery() {
+  local package service
+  for service in avahi-daemon wsdd-server wsdd wsdd2; do
+    systemctl disable --now "$service" 2>/dev/null || true
+  done
+  rm -f /etc/avahi/services/smb.service
+  firewall_delete udp 5353
+  firewall_delete udp 3702
+  firewall_delete tcp 5357
+  purge_packages avahi-daemon wsdd-server wsdd wsdd2
+  systemctl daemon-reload
+}
+
+uninstall_ntp() {
+  systemctl disable --now chrony 2>/dev/null || true
+  firewall_delete udp 123
+  purge_packages chrony
+  if [[ -e /etc/nas-setup/systemd-timesyncd.was-enabled ]]; then
+    systemctl enable --now systemd-timesyncd 2>/dev/null || true
+    rm -f /etc/nas-setup/systemd-timesyncd.was-enabled
+  fi
+}
+
+uninstall_dns() {
+  systemctl disable --now nas-dns-blocklist.timer dnsmasq 2>/dev/null || true
+  rm -f /etc/dnsmasq.d/nas.conf \
+    /etc/systemd/system/nas-dns-blocklist.service \
+    /etc/systemd/system/nas-dns-blocklist.timer \
+    /usr/local/sbin/update-dns-blocklist
+  firewall_delete tcp 53
+  firewall_delete udp 53
+  firewall_delete_dhcp
+  purge_packages dnsmasq curl
+  if [[ -e /etc/nas-setup/dns-enabled ]]; then
+    if [[ -e /etc/nas-setup/resolv.conf.orig ]]; then
+      rm -f /etc/resolv.conf
+      cp -a /etc/nas-setup/resolv.conf.orig /etc/resolv.conf
+    else
+      warn "Backup de /etc/resolv.conf não encontrado; restaure o DNS do sistema manualmente."
+    fi
+    rm -f /etc/nas-setup/dns-enabled
+  fi
+  if [[ -e /etc/nas-setup/systemd-resolved.was-enabled ]]; then
+    systemctl enable --now systemd-resolved 2>/dev/null || true
+    rm -f /etc/nas-setup/systemd-resolved.was-enabled
+  fi
+  systemctl daemon-reload
+}
+
+uninstall_speedtest() {
+  systemctl disable --now nas-speedtest.timer nas-speedtest-graph.timer 2>/dev/null || true
+  rm -f /etc/systemd/system/nas-speedtest.service \
+    /etc/systemd/system/nas-speedtest.timer \
+    /etc/systemd/system/nas-speedtest-graph.service \
+    /etc/systemd/system/nas-speedtest-graph.timer \
+    /usr/local/bin/nas-speedtest
+  purge_packages speedtest-cli python3-matplotlib
+  systemctl daemon-reload
+}
+
+uninstall_web() {
+  systemctl disable --now marcelinoWeb.service 2>/dev/null || true
+  rm -f /etc/systemd/system/marcelinoWeb.service /etc/default/marcelinoWeb /usr/local/bin/marcelinoWeb
+  rm -rf /opt/marcelinoWeb
+  firewall_delete tcp "$WEB_PORT"
+  systemctl daemon-reload
+  log "Configuração, certificados e usuários web preservados em /etc/marcelinoWeb."
+}
+
+uninstall_anytype() {
+  systemctl disable --now nas-anytype.service 2>/dev/null || true
+  rm -f /etc/systemd/system/nas-anytype.service
+  firewall_delete tcp 33010
+  firewall_delete udp 33020
+  systemctl daemon-reload
+  if command -v docker >/dev/null 2>&1 && systemctl is-active --quiet docker; then
+    local active_containers
+    active_containers=$(docker ps -q 2>/dev/null) || active_containers=unknown
+    if [[ -z "$active_containers" ]]; then
+      systemctl disable --now docker.socket docker 2>/dev/null || true
+      purge_packages docker.io
+    else
+      warn "Docker mantido porque há outros contêineres ativos."
+    fi
+  else
+    purge_packages docker.io
+  fi
+  log "Dados do Anytype preservados em $ANYTYPE_DATA."
+}
+
+uninstall_ssh() {
+  systemctl disable --now ssh 2>/dev/null || systemctl disable --now sshd 2>/dev/null || true
+  rm -f /etc/profile.d/ssh-timeout.sh /etc/ssh/sshd_config.d/10-nas-setup.conf
+  firewall_delete tcp "$SSH_PORT"
+  purge_packages openssh-server
+  systemctl daemon-reload
+}
+
+uninstall_dlna() {
+  systemctl disable --now minidlna 2>/dev/null || true
+  rm -f /etc/minidlna.conf
+  firewall_delete udp 1900
+  firewall_delete tcp "$DLNA_PORT"
+  purge_packages minidlna
+  log "Mídias, banco/cache DLNA e logs preservados."
 }
 
 ###############################################################################
@@ -837,6 +1145,7 @@ setup_firewall() {
 
 WSDD_PKG=""
 RUN_ALL="no"
+HAS_UNINSTALL="no"
 declare -a SELECTED_STEPS=()
 
 if [[ $# -eq 0 ]]; then
@@ -847,7 +1156,6 @@ fi
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --all)       RUN_ALL="yes" ;;
-    --install)   SELECTED_STEPS+=(install) ;;
     --raid)      SELECTED_STEPS+=(raid) ;;
     --storage)   SELECTED_STEPS+=(storage) ;;
     --user)      SELECTED_STEPS+=(user) ;;
@@ -858,8 +1166,18 @@ while [[ $# -gt 0 ]]; do
     --dns)       SELECTED_STEPS+=(dns) ;;
     --speedtest) SELECTED_STEPS+=(speedtest) ;;
     --web)       SELECTED_STEPS+=(web) ;;
+    --anytype)   SELECTED_STEPS+=(anytype) ;;
     --ssh)       SELECTED_STEPS+=(ssh) ;;
-    --firewall)  SELECTED_STEPS+=(firewall) ;;
+    --dlna)      SELECTED_STEPS+=(dlna) ;;
+    --uninstall-samba|--unistall-samba) SELECTED_STEPS+=(uninstall_samba); HAS_UNINSTALL="yes" ;;
+    --uninstall-discovery|--unistall-discovery) SELECTED_STEPS+=(uninstall_discovery); HAS_UNINSTALL="yes" ;;
+    --uninstall-ntp|--unistall-ntp) SELECTED_STEPS+=(uninstall_ntp); HAS_UNINSTALL="yes" ;;
+    --uninstall-dns|--unistall-dns) SELECTED_STEPS+=(uninstall_dns); HAS_UNINSTALL="yes" ;;
+    --uninstall-speedtest|--unistall-speedtest) SELECTED_STEPS+=(uninstall_speedtest); HAS_UNINSTALL="yes" ;;
+    --uninstall-web|--unistall-web) SELECTED_STEPS+=(uninstall_web); HAS_UNINSTALL="yes" ;;
+    --uninstall-anytype|--unistall-anytype) SELECTED_STEPS+=(uninstall_anytype); HAS_UNINSTALL="yes" ;;
+    --uninstall-ssh|--unistall-ssh) SELECTED_STEPS+=(uninstall_ssh); HAS_UNINSTALL="yes" ;;
+    --uninstall-dlna|--unistall-dlna) SELECTED_STEPS+=(uninstall_dlna); HAS_UNINSTALL="yes" ;;
     -h|--help)   show_help; exit 0 ;;
     *)           die "Opção desconhecida: $1. Use --help para ver as opções." ;;
   esac
@@ -867,35 +1185,38 @@ while [[ $# -gt 0 ]]; do
 done
 
 if [[ "$RUN_ALL" != "yes" && ${#SELECTED_STEPS[@]} -eq 0 ]]; then
-  die "Informe ao menos uma etapa ou use --all."
+  die "Informe ao menos uma opção ou use --all."
 fi
 
-validate_raid_filesystem
+[[ "$RUN_ALL" != "yes" && " ${SELECTED_STEPS[*]} " != *" raid "* && " ${SELECTED_STEPS[*]} " != *" storage "* ]] \
+  || validate_raid_filesystem
+
+[[ "$RUN_ALL" != "yes" || "$HAS_UNINSTALL" != "yes" ]] \
+  || die "--all não pode ser combinado com opções de desinstalação."
 
 [[ $EUID -eq 0 ]] || die "Execute como root."
 
 NEEDS_LAN="no"
-if [[ "$RUN_ALL" == "yes" ]]; then
-  NEEDS_LAN="yes"
-else
-  for step in "${SELECTED_STEPS[@]}"; do
-    case "$step" in
-      samba|ntp|web|firewall) NEEDS_LAN="yes" ;;
-    esac
-  done
-fi
+for step in "${SELECTED_STEPS[@]}"; do
+  case "$step" in
+    samba|discovery|ntp|dns|speedtest|web|anytype|ssh|dlna|uninstall_*) NEEDS_LAN="yes" ;;
+  esac
+done
+[[ "$RUN_ALL" != "yes" ]] || NEEDS_LAN="yes"
 if [[ "$NEEDS_LAN" == "yes" ]]; then
-  [[ -n "$LAN_CIDR" ]] || LAN_CIDR=$(detect_lan_cidr)
+  LAN_CIDR=$(detect_lan_cidr)
   log "Rede local: $LAN_CIDR"
 fi
 
 if [[ "$RUN_ALL" == "yes" ]]; then
-  SELECTED_STEPS=(install network raid storage user samba discovery ntp dns speedtest web ssh firewall)
+  SELECTED_STEPS=(network raid storage user ssh samba discovery ntp dns speedtest web anytype dlna)
 fi
 
 # Executa na ordem canônica, independentemente da ordem dos argumentos
 ORDERED_STEPS=()
-for s in install network raid storage user samba discovery ntp dns speedtest web ssh firewall; do
+for s in network raid storage user ssh samba discovery ntp dns speedtest web anytype dlna \
+  uninstall_samba uninstall_discovery uninstall_ntp uninstall_dns uninstall_speedtest \
+  uninstall_web uninstall_anytype uninstall_ssh uninstall_dlna; do
   for step in "${SELECTED_STEPS[@]}"; do
     [[ "$step" == "$s" ]] && ORDERED_STEPS+=("$s")
   done
@@ -904,19 +1225,28 @@ SELECTED_STEPS=("${ORDERED_STEPS[@]}")
 
 for step in "${SELECTED_STEPS[@]}"; do
   case "$step" in
-    install)   install_packages ;;
     raid)      setup_raid ;;
     storage)   setup_storage ;;
     user)      setup_user ;;
     samba)     setup_samba ;;
-    discovery) detect_wsdd_package; setup_discovery ;;
+    discovery) setup_discovery ;;
     network)   setup_network ;;
     ntp)       setup_ntp ;;
     dns)       setup_dns ;;
     speedtest) setup_speedtest ;;
     web)       setup_web ;;
+    anytype)   setup_anytype ;;
     ssh)       setup_ssh ;;
-    firewall)  setup_firewall ;;
+    dlna)      setup_dlna ;;
+    uninstall_samba)     uninstall_samba ;;
+    uninstall_discovery) uninstall_discovery ;;
+    uninstall_ntp)      uninstall_ntp ;;
+    uninstall_dns)      uninstall_dns ;;
+    uninstall_speedtest) uninstall_speedtest ;;
+    uninstall_web)       uninstall_web ;;
+    uninstall_anytype)   uninstall_anytype ;;
+    uninstall_ssh)       uninstall_ssh ;;
+    uninstall_dlna)      uninstall_dlna ;;
   esac
 done
 

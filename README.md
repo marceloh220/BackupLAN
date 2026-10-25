@@ -24,24 +24,26 @@ O `nas-setup.sh` destina-se a Debian e deve ser executado como root. Consulte as
 sudo bash nas-setup.sh --help
 ```
 
-As etapas podem ser executadas separadamente ou combinadas:
+Cada opção de serviço instala suas dependências, configura o serviço e abre somente suas portas no UFW. As opções podem ser executadas separadamente ou combinadas:
 
 | Opção | O que configura |
 |---|---|
-| `--install` | Instala mdadm, Samba, Avahi, UFW, `python3-psutil`, `smartmontools`, `pciutils`, `fontconfig`, utilitários de armazenamento e WS-Discovery; instala `xfsprogs` ou `btrfs-progs` conforme `RAID_FILESYSTEM`, além de cryptsetup, chrony, `dnsmasq` e `curl` conforme as opções configuradas. |
 | `--network` | Configura o IP estático `NAS_IP`/`NAS_PREFIX` na interface (NetworkManager ou `/etc/network/interfaces`, com backup em `interfaces.orig`). A conexão SSH atual pode cair; reconecte no novo IP. |
 | `--raid` | Cria o RAID com `mdadm` e atualiza a configuração de boot. |
 | `--storage` | Formata e monta o volume; pode configurar criptografia LUKS e desbloqueio automático. |
 | `--user` | Cria o usuário principal (`USER_NAME`, senha `USER_PASSWORD`) no sistema e no Samba; também é executado pelas etapas Samba, dashboard e teste de velocidade. |
-| `--samba` | Cria usuário/grupo, diretórios, permissões e shares; valida a configuração com `testparm` e reinicia Samba. |
-| `--discovery` | Ativa anúncio SMB por Avahi/mDNS e WS-Discovery quando disponível. |
-| `--ntp` | Configura o chrony como servidor de horário da LAN quando `NTP_ENABLE=yes`. |
-| `--dns` | Configura o dnsmasq como DNS e DHCP da LAN (veja abaixo). |
-| `--speedtest` | Instala `nas-speedtest` (a partir de `nas-speedtest.py`) e os timers de teste e gráfico (veja abaixo). |
-| `--web` | Instala o dashboard web com login (veja abaixo). |
-| `--ssh` | Encerra sessões SSH interativas após `SSH_MAX_SESSION` segundos de inatividade (padrão 600, ou seja, 10 min) via `TMOUT`, e derruba clientes que não respondem (`ClientAliveInterval`/`ClientAliveCountMax`). |
-| `--firewall` | Configura UFW para SSH, Samba, descoberta, DNS (53), DHCP (67/udp) e, se habilitado, NTP e a porta do dashboard (`WEB_PORT`). A configuração redefine as regras atuais do UFW. |
-| `--all` | Executa as etapas na ordem recomendada: instalação, rede, RAID, armazenamento, Samba, descoberta, NTP, DNS/DHCP, teste de velocidade, dashboard web, SSH e firewall. |
+| `--samba` / `--uninstall-samba` | Instala/configura Samba e libera suas portas; a desinstalação para o serviço e remove o pacote, mantendo shares e arquivos. |
+| `--discovery` / `--uninstall-discovery` | Configura/remove Avahi e WS-Discovery, com suas portas de firewall. |
+| `--ntp` / `--uninstall-ntp` | Configura/remove chrony como servidor de horário da LAN, com a porta NTP. |
+| `--dns` / `--uninstall-dns` | Configura/remove dnsmasq para DNS e DHCP da LAN (veja abaixo), com restauração do backup de `resolv.conf`. |
+| `--speedtest` / `--uninstall-speedtest` | Instala/remove o comando e os timers de teste/gráfico; logs e gráficos existentes são preservados. |
+| `--web` / `--uninstall-web` | Instala/remove o dashboard e sua regra de firewall; usuários, certificados e configuração persistente são preservados. |
+| `--anytype` / `--uninstall-anytype` | Configura/remove o serviço Anytype em Docker; dados são preservados e Docker só é desabilitado/removido se não houver outros contêineres ativos. |
+| `--ssh` / `--uninstall-ssh` | Instala/configura ou remove o servidor SSH, configurações gerenciadas e regra da porta `SSH_PORT`. A desinstalação encerra o acesso SSH remoto. |
+| `--dlna` / `--uninstall-dlna` | Instala/remove MiniDLNA e abre/fecha SSDP e a porta `DLNA_PORT`; mídia, banco/cache e logs são preservados. |
+| `--all` | Configura rede, RAID, armazenamento, usuário e todos os serviços, incluindo SSH e DLNA. Não executa desinstalações. |
+
+As opções de desinstalação aceitam também a grafia `--unistall-*` por compatibilidade. Não há opção para desinstalar RAID ou armazenamento: nenhuma opção de remoção apaga partições, altera LUKS, desmonta volumes ou desativa arrays RAID. O firewall não é redefinido; somente as regras da etapa selecionada são alteradas.
 
 As opções são editadas na seção **CONFIGURAÇÃO** no começo do script. Os valores fornecidos incluem:
 
@@ -53,6 +55,30 @@ As opções são editadas na seção **CONFIGURAÇÃO** no começo do script. Os
 - Usuário principal: `USER_NAME` e `USER_PASSWORD` (troque o valor `sua_senha_aqui`; mínimo 8 caracteres). A senha fica em texto puro no script; restrinja o acesso ao arquivo.
 - Grupo de trabalho `WORKGROUP`, domínio `lan` (`LOCAL_DOMAIN`), SSH na porta 22 e chrony habilitado.
 - Rede: `IP_INET`, `IP_GATEWAY`, `IP_RANGE_START`, `IP_RANGE_END`, `DNS_UPSTREAM` e `LOCAL_DOMAIN` ficam no topo do script e alimentam `NAS_IP`, `NET_GATEWAY`, a faixa DHCP e o domínio. Ajuste-os para a sua rede (o NAS, o gateway e a faixa DHCP devem estar na mesma sub-rede).
+
+### Anytype: sync host local
+
+A etapa `--anytype` usa o projeto comunitário [any-sync-bundle](https://github.com/grishy/any-sync-bundle), não a stack oficial completa do Anytype. O contêiner reúne os serviços de sincronização e armazena os dados no NAS. A imagem all-in-one exige uma CPU compatível com seu MongoDB (AVX em x86_64).
+
+Revise `ANYTYPE_ENABLE` (padrão `yes`), `ANYTYPE_IMAGE` (versão fixada), `ANYTYPE_DATA` (padrão `/srv/nas/anytype`) e `ANYTYPE_HOST` (padrão `NAS_IP`). Monte o armazenamento antes de configurar o serviço:
+
+```bash
+sudo bash nas-setup.sh --anytype
+sudo systemctl status nas-anytype.service
+sudo journalctl -u nas-anytype.service -n 50 --no-pager
+```
+
+O serviço systemd inicia o contêiner com a rede do host, sem publicar portas via NAT do Docker; assim o UFW controla o acesso. Somente `LAN_CIDR` recebe acesso a **33010/tcp** (sync) e **33020/udp** (QUIC). Não é necessário abrir portas no roteador para uso na LAN.
+
+Após a primeira inicialização, transfira com segurança `/srv/nas/anytype/client-config.yml` para cada dispositivo e importe-o em **Network > Self-hosted** no Anytype. Se alterar `ANYTYPE_DATA`, use o caminho correspondente. O diretório é restrito ao root; não compartilhe `bundle-config.yml`, pois contém chaves privadas. Recomenda-se usar uma identidade dedicada e exportar/importar os dados ao migrar de outra rede.
+
+`ANYTYPE_HOST` define o endereço anunciado apenas no primeiro início. Para mudar esse endereço posteriormente, edite `externalAddr` em `bundle-config.yml`, reinicie `nas-anytype.service` e importe novamente o `client-config.yml` gerado nos dispositivos.
+
+Faça backup de todo `ANYTYPE_DATA`, incluindo `bundle-config.yml`, com o serviço parado de forma limpa (`sudo systemctl stop nas-anytype.service`). Confira nos logs `bundle_shutdown_complete` antes de copiar e inicie novamente com `sudo systemctl start nas-anytype.service`. Não apague esse diretório ao atualizar a imagem. Definir `ANYTYPE_ENABLE=no` pula a configuração e as liberações futuras; para parar uma instalação existente, execute também `sudo systemctl disable --now nas-anytype.service`.
+
+### DLNA
+
+`--dlna` instala MiniDLNA e exige que o volume de armazenamento já esteja montado. Ajuste `DLNA_ENABLE`, `DLNA_PORT`, `DLNA_MEDIA_MUSIC`, `DLNA_MEDIA_VIDEO`, `DLNA_MEDIA_PICTURES`, `DLNA_CACHE` e `DLNA_LOG` no início de `nas-setup.sh`. A regra do UFW é criada junto com o serviço; para remover MiniDLNA e fechar as portas, execute `sudo bash nas-setup.sh --uninstall-dlna` (ou `--unistall-dlna`). A remoção mantém as mídias, o banco/cache e os logs.
 
 ### Teste de velocidade da internet
 
@@ -188,7 +214,7 @@ O `marcelinoWeb.py` (somente biblioteca padrão do Python) lê o JSON publicado 
 Instalação (`marcelinoWeb.py` e `marcelinoWeb.service` devem estar na pasta do `nas-setup.sh`):
 
 ```bash
-sudo bash nas-setup.sh --web --firewall
+sudo bash nas-setup.sh --web
 ```
 
 Variáveis `WEB_*` no topo do `nas-setup.sh`:
@@ -202,7 +228,7 @@ Variáveis `WEB_*` no topo do `nas-setup.sh`:
 | `WEB_ADMIN` | Usuário web inicial; padrão `USER_NAME`, com a senha `USER_PASSWORD`. Vazio = cadastre depois. |
 | `WEB_TLS` | `yes` gera certificado autoassinado e serve HTTPS; o navegador mostra um aviso na primeira visita. |
 
-Com `WEB_TLS=yes` a porta serve apenas HTTPS; acesse `https://IP_DO_NAS:PORTA` (por exemplo `https://192.168.100.1:80`). O firewall libera a porta somente para `LAN_CIDR`, mas apenas na etapa `--firewall`.
+Com `WEB_TLS=yes` a porta serve apenas HTTPS; acesse `https://IP_DO_NAS:PORTA` (por exemplo `https://192.168.100.1:443`). O firewall libera a porta somente para `LAN_CIDR` quando `--web` é executado.
 
 ### Usuários
 

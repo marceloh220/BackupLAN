@@ -101,7 +101,16 @@ try {
         $Shortcut.Save()
     }
 
+    $TaskName = "MarcelinoClient"
+    $TaskAction = New-ScheduledTaskAction -Execute $ExecutablePath -WorkingDirectory $InstallDir
+    $TaskTrigger = New-ScheduledTaskTrigger -AtLogOn -User "$env:USERDOMAIN\$env:USERNAME"
+    $TaskSettings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit ([TimeSpan]::Zero)
+    $TaskPrincipal = New-ScheduledTaskPrincipal -UserId "$env:USERDOMAIN\$env:USERNAME" -LogonType Interactive
+    Register-ScheduledTask -TaskName $TaskName -Action $TaskAction -Trigger $TaskTrigger `
+        -Settings $TaskSettings -Principal $TaskPrincipal -Force | Out-Null
+
     Write-Host "Instalação concluída."
+    Write-Host "Tarefa agendada (início com o sistema): $TaskName"
     Write-Host "Executável: $ExecutablePath"
     Write-Host "Ícone: $InstalledIconPath"
     Write-Host "Atalho na Área de Trabalho: $($ShortcutPaths[0])"
