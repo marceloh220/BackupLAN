@@ -917,7 +917,7 @@ setup_marcelino_server() {
   ensure_packages python3 python3-psutil smartmontools
   log "Instalando marcelinoServer..."
   install -d -o root -g root -m 0755 /opt/marcelinoServer /etc/default
-  mkdir -p "$(dirname "$WEB_STATUS")"
+  install -d -o root -g root -m 0755 "$(dirname "$WEB_STATUS")"
   install -o root -g root -m 0644 "$dir/marcelinoServer.py" /opt/marcelinoServer/marcelinoServer.py
   install -o root -g root -m 0644 "$dir/marcelinoServer.service" /etc/systemd/system/marcelinoServer.service
   if [[ ! -f /etc/default/marcelinoServer ]]; then
@@ -930,16 +930,21 @@ EOF
   fi
   config_tmp=$(mktemp /etc/default/marcelinoServer.XXXXXX)
   awk -v status_path="$WEB_STATUS" '
-    /^MARCELINOSRV_(SCRIPT|STATUS)=/ { next }
+    /^MARCELINOSRV_(SCRIPT|STATUS|FILE_MODE)=/ { next }
     { print }
     END {
       print "MARCELINOSRV_SCRIPT=/opt/marcelinoServer/marcelinoServer.py"
       print "MARCELINOSRV_STATUS=" status_path
+      print "MARCELINOSRV_FILE_MODE=0644"
     }
   ' /etc/default/marcelinoServer > "$config_tmp"
   chown --reference=/etc/default/marcelinoServer "$config_tmp"
   chmod --reference=/etc/default/marcelinoServer "$config_tmp"
   mv "$config_tmp" /etc/default/marcelinoServer
+  if [[ -f "$WEB_STATUS" ]]; then
+    chown root:root "$WEB_STATUS"
+    chmod 0644 "$WEB_STATUS"
+  fi
   if command -v systemd-analyze >/dev/null 2>&1; then
     systemd-analyze verify /etc/systemd/system/marcelinoServer.service
   fi

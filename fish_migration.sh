@@ -1,6 +1,9 @@
 #!/usr/bin/fish
 
+set -U fish_greeting ""
 echo "zoxide init fish | source" >> ~/.config/fish/config.fish
+echo "whatthedouchsay" >> ~/.config/fish/config.fish
+
 # lsd aliases
 alias --save ls='lsd --group-directories-first'
 alias --save la='lsd -a --group-directories-first'
@@ -16,6 +19,9 @@ alias --save aupgrade='sudo apt update && sudo apt upgrade'
 alias --save aremove='sudo apt remove'
 alias --save aautoremove='sudo apt autoremove'
 alias --save asearch='sudo apt search'
+
+# nano alias
+alias --save nano="nano --linenumbers --tabtospaces --tabsize 4"
 
 # utils aliases
 alias --save cat='batcat'
