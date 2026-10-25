@@ -10,7 +10,7 @@ Este projeto reúne o script de configuração de um NAS Debian, um agente que p
 | Teste de velocidade | `nas-speedtest.py` | Mede download, upload e ping; registra resultados em JSONL, lista testes e gera gráficos. |
 | Agente de estatísticas | `marcelinoServer.py` | Publica métricas do servidor, estado dos arrays RAID e regras de compartilhamento Samba em JSON. |
 | Serviço systemd | `marcelinoServer.service` | Executa o agente após a inicialização do sistema. |
-| Instalador do agente | `install_marcelinoServer.sh` | Instala o agente, configura o arquivo de ambiente e inicia o serviço. |
+| Instalador do agente | `install_marcelinoServer.sh` | Atalho compatível para `nas-setup.sh --marcelino-server`. |
 | Dashboard web | `marcelinoWeb.py`, `marcelinoWeb.service` | Servidor web com login que exibe as métricas publicadas pelo agente, incluindo estado e sincronização do RAID, acessível pela rede local. |
 | Cliente Windows | `marcelinoClient.py` | Interface para métricas do servidor, discos e RAID, compartilhamentos, backup/restauração e terminal SSH. |
 | Prévia do cliente | `preview_marcelinoClient.py` | Abre uma aba com dados genéricos locais, sem conexão com servidor. |
@@ -31,12 +31,13 @@ Cada opção de serviço instala suas dependências, configura o serviço e abre
 | `--network` | Configura o IP estático `NAS_IP`/`NAS_PREFIX` na interface (NetworkManager ou `/etc/network/interfaces`, com backup em `interfaces.orig`). A conexão SSH atual pode cair; reconecte no novo IP. |
 | `--raid` | Cria o RAID com `mdadm` e atualiza a configuração de boot. |
 | `--storage` | Formata e monta o volume; pode configurar criptografia LUKS e desbloqueio automático. |
-| `--user` | Cria o usuário principal (`USER_NAME`, senha `USER_PASSWORD`) no sistema e no Samba; também é executado pelas etapas Samba, dashboard e teste de velocidade. |
+| `--user` | Cria os cadastros ausentes do usuário principal (`USER_NAME`, senha `USER_PASSWORD`) no sistema e no Samba; preserva o home e as senhas de contas existentes e garante associação ao grupo Samba. Também é executado pelas etapas Samba, dashboard e teste de velocidade. |
 | `--samba` / `--uninstall-samba` | Instala/configura Samba e libera suas portas; a desinstalação para o serviço e remove o pacote, mantendo shares e arquivos. |
 | `--discovery` / `--uninstall-discovery` | Configura/remove Avahi e WS-Discovery, com suas portas de firewall. |
 | `--ntp` / `--uninstall-ntp` | Configura/remove chrony como servidor de horário da LAN, com a porta NTP. |
 | `--dns` / `--uninstall-dns` | Configura/remove dnsmasq para DNS e DHCP da LAN (veja abaixo), com restauração do backup de `resolv.conf`. |
 | `--speedtest` / `--uninstall-speedtest` | Instala/remove o comando e os timers de teste/gráfico; logs e gráficos existentes são preservados. |
+| `--marcelino-server` / `--uninstall-marcelino-server` | Instala/remove o agente de métricas, sem abrir portas; configuração e JSON existentes são preservados na remoção. |
 | `--web` / `--uninstall-web` | Instala/remove o dashboard e sua regra de firewall; usuários, certificados e configuração persistente são preservados. |
 | `--anytype` / `--uninstall-anytype` | Configura/remove o serviço Anytype em Docker; dados são preservados e Docker só é desabilitado/removido se não houver outros contêineres ativos. |
 | `--ssh` / `--uninstall-ssh` | Instala/configura ou remove o servidor SSH, configurações gerenciadas e regra da porta `SSH_PORT`. A desinstalação encerra o acesso SSH remoto. |
@@ -50,9 +51,10 @@ As opções são editadas na seção **CONFIGURAÇÃO** no começo do script. Os
 - RAID espelhado nível 1 com `/dev/sdb` e `/dev/sdc`, criado como `/dev/md0`.
 - Sistema de arquivos configurável em `RAID_FILESYSTEM`: `ext4` (padrão), `xfs` ou `btrfs`.
 - Volume em `/srv/nas`; LUKS habilitado sobre `/dev/md0`, com mapeamento `nas_crypt`, keyfile `/etc/nas.key` e desbloqueio automático.
+- Aplicativos em `APP_STORAGE` (padrão `/srv/app`): Monitor, Anytype e banco/cache DLNA. Esse caminho não fica automaticamente no RAID nem dentro do LUKS; configure uma montagem própria ou use um caminho dentro do volume se precisar dessa proteção.
 - Shares `Publico`, `Privado`, `Backup`, `Midia`, `Monitor` e o share do usuário principal (`USER_NAME` com a primeira letra maiúscula).
 - `Publico` permite convidados; `Backup` e `Midia` usam o grupo `nasgroup`; `Privado` e o share do usuário são restritos a `USER_NAME`.
-- Usuário principal: `USER_NAME` e `USER_PASSWORD` (troque o valor `sua_senha_aqui`; mínimo 8 caracteres). A senha fica em texto puro no script; restrinja o acesso ao arquivo.
+- Usuário principal: `USER_NAME` e `USER_PASSWORD` (troque o valor `sua_senha_aqui`; mínimo 8 caracteres para novos cadastros). Contas Linux e Samba existentes mantêm suas senhas; se ambas já existirem, a etapa de usuário não exige uma nova senha. O dashboard usa `USER_PASSWORD` separadamente para o login web. A senha fica em texto puro no script; restrinja o acesso ao arquivo.
 - Grupo de trabalho `WORKGROUP`, domínio `lan` (`LOCAL_DOMAIN`), SSH na porta 22 e chrony habilitado.
 - Rede: `IP_INET`, `IP_GATEWAY`, `IP_RANGE_START`, `IP_RANGE_END`, `DNS_UPSTREAM` e `LOCAL_DOMAIN` ficam no topo do script e alimentam `NAS_IP`, `NET_GATEWAY`, a faixa DHCP e o domínio. Ajuste-os para a sua rede (o NAS, o gateway e a faixa DHCP devem estar na mesma sub-rede).
 
@@ -60,7 +62,7 @@ As opções são editadas na seção **CONFIGURAÇÃO** no começo do script. Os
 
 A etapa `--anytype` usa o projeto comunitário [any-sync-bundle](https://github.com/grishy/any-sync-bundle), não a stack oficial completa do Anytype. O contêiner reúne os serviços de sincronização e armazena os dados no NAS. A imagem all-in-one exige uma CPU compatível com seu MongoDB (AVX em x86_64).
 
-Revise `ANYTYPE_ENABLE` (padrão `yes`), `ANYTYPE_IMAGE` (versão fixada), `ANYTYPE_DATA` (padrão `/srv/nas/anytype`) e `ANYTYPE_HOST` (padrão `NAS_IP`). Monte o armazenamento antes de configurar o serviço:
+Revise `ANYTYPE_ENABLE` (padrão `yes`), `ANYTYPE_IMAGE` (versão fixada), `ANYTYPE_DATA` (padrão `/srv/app/anytype`) e `ANYTYPE_HOST` (padrão `NAS_IP`). Monte o armazenamento antes de configurar o serviço:
 
 ```bash
 sudo bash nas-setup.sh --anytype
@@ -70,7 +72,7 @@ sudo journalctl -u nas-anytype.service -n 50 --no-pager
 
 O serviço systemd inicia o contêiner com a rede do host, sem publicar portas via NAT do Docker; assim o UFW controla o acesso. Somente `LAN_CIDR` recebe acesso a **33010/tcp** (sync) e **33020/udp** (QUIC). Não é necessário abrir portas no roteador para uso na LAN.
 
-Após a primeira inicialização, transfira com segurança `/srv/nas/anytype/client-config.yml` para cada dispositivo e importe-o em **Network > Self-hosted** no Anytype. Se alterar `ANYTYPE_DATA`, use o caminho correspondente. O diretório é restrito ao root; não compartilhe `bundle-config.yml`, pois contém chaves privadas. Recomenda-se usar uma identidade dedicada e exportar/importar os dados ao migrar de outra rede.
+Após a primeira inicialização, transfira com segurança `/srv/app/anytype/client-config.yml` para cada dispositivo e importe-o em **Network > Self-hosted** no Anytype. Se alterar `ANYTYPE_DATA`, use o caminho correspondente. O diretório é restrito ao root; não compartilhe `bundle-config.yml`, pois contém chaves privadas. Recomenda-se usar uma identidade dedicada e exportar/importar os dados ao migrar de outra rede.
 
 `ANYTYPE_HOST` define o endereço anunciado apenas no primeiro início. Para mudar esse endereço posteriormente, edite `externalAddr` em `bundle-config.yml`, reinicie `nas-anytype.service` e importe novamente o `client-config.yml` gerado nos dispositivos.
 
@@ -146,7 +148,9 @@ Para escolher o formato, altere `RAID_FILESYSTEM` na seção **CONFIGURAÇÃO** 
 RAID_FILESYSTEM="xfs"
 ```
 
-Sem LUKS, o formato é aplicado diretamente em `RAID_DEVICE`. Com LUKS, o contêiner criptografado fica em `CRYPT_DEVICE` e o sistema de arquivos é criado no volume aberto `/dev/mapper/$CRYPT_NAME`. O tipo escolhido também é gravado no `/etc/fstab`. Se o volume já tiver o mesmo sistema de arquivos, o script o preserva; se encontrar um formato diferente, interrompe a etapa para evitar uma montagem incorreta. Se não encontrar um sistema de arquivos, cria o escolhido.
+Antes de configurar RAID ou storage, o script verifica o ponto de montagem configurado (`CRYPT_MOUNTPOINT` com LUKS, ou `RAID_MOUNTPOINT` sem LUKS). Se ele estiver montado ou registrado no `/etc/fstab`, ambas as etapas são puladas, inclusive com `--all`, sem alterar discos, keyfile, `fstab` ou `crypttab`. A detecção considera o destino de montagem, não valida a integridade do volume nem sua correspondência com os discos configurados. Se estiver desmontado ou com LUKS fechado, abra e monte o volume antes de executar os serviços que precisam dos dados. O RAID também é preservado quando `RAID_DEVICE` já existe.
+
+Quando não há montagem nem entrada existente no `fstab`, sem LUKS o formato é aplicado diretamente em `RAID_DEVICE`. Com LUKS, o contêiner criptografado fica em `CRYPT_DEVICE` e o sistema de arquivos é criado no volume aberto `/dev/mapper/$CRYPT_NAME`. O tipo escolhido também é gravado no `/etc/fstab`. Se o volume já tiver o mesmo sistema de arquivos, o script o preserva; se encontrar um formato diferente, interrompe a etapa para evitar uma montagem incorreta. Se não encontrar um sistema de arquivos, cria o escolhido.
 
 **Atenção:** revise `RAID_DEVICES`, `RAID_DEVICE`, `RAID_FILESYSTEM`, `CRYPT_DEVICE` e as opções LUKS antes de executar. A criação do RAID apaga assinaturas dos discos selecionados após confirmação. A configuração LUKS e a criação do sistema de arquivos podem destruir dados existentes; mantenha backups. A etapa `--samba` substitui `/etc/samba/smb.conf`; guarda uma cópia inicial em `/etc/samba/smb.conf.orig` se ela ainda não existir.
 
@@ -166,13 +170,15 @@ sudo bash nas-setup.sh --samba --discovery
 
 O agente `marcelinoServer.py` coleta carga, frequência e temperatura da CPU, memória, tempo ativo, rede, informações do sistema, sistemas de arquivos montados, discos físicos/SMART, estado e atividade dos arrays RAID via `/proc/mdstat`, configuração dos compartilhamentos Samba e estado/atividade DNS e DHCP. Frequência e temperatura são opcionais: aparecem indisponíveis se o hardware ou o sistema não expuserem esses dados. O JSON padrão chama-se `.marcelinoSrv.json`.
 
-O instalador deve ser executado no servidor Linux, depois de instalar/configurar o Samba:
+O instalador deve ser executado no servidor Debian com systemd. Mantenha `marcelinoServer.py` e `marcelinoServer.service` junto do script:
 
 ```bash
-sudo bash install_marcelinoServer.sh
+sudo bash nas-setup.sh --marcelino-server
 ```
 
-Ele instala os arquivos em `/opt/marcelinoServer`, instala a unidade em `/etc/systemd/system/marcelinoServer.service`, atualiza `/etc/default/marcelinoServer`, habilita a inicialização no boot via `WantedBy=multi-user.target` e reinicia o serviço. O caminho de `MARCELINOSRV_STATUS` é calculado com base no caminho do share público encontrado em `/etc/samba/smb.conf` (`public`, `publico` ou `público`) e aponta para `.marcelinoSrv.json` na raiz desse share. Ao atualizar uma instalação existente, o instalador preserva as demais variáveis e substitui/adiciona apenas `MARCELINOSRV_STATUS`.
+Ele instala `python3`, `python3-psutil` e `smartmontools`, copia os arquivos para `/opt/marcelinoServer`, instala a unidade em `/etc/systemd/system/marcelinoServer.service`, atualiza `/etc/default/marcelinoServer`, habilita a inicialização no boot e reinicia o serviço. `MARCELINOSRV_STATUS` usa `WEB_STATUS` (padrão `/srv/app/monitor/.marcelinoSrv.json`), compartilhando o destino com o dashboard e o share Monitor. Reinstalações atualizam os caminhos do script e do JSON e preservam as demais variáveis. Não é necessário configurar rede, Samba ou firewall para instalar apenas o agente. `--all` também instala o agente antes do dashboard; o instalador antigo permanece como atalho.
+
+Para remover, use `sudo bash nas-setup.sh --uninstall-marcelino-server` (ou `--unistall-marcelino-server`). A remoção desativa o serviço e remove a unidade e o script instalado, preservando `/etc/default/marcelinoServer`, métricas e dependências compartilhadas.
 
 ### Configuração do serviço
 
@@ -187,7 +193,7 @@ Variáveis utilizadas pela unidade:
 | Variável | Finalidade | Padrão do instalador |
 |---|---|---|
 | `MARCELINOSRV_SCRIPT` | Caminho do agente Python. | `/opt/marcelinoServer/marcelinoServer.py` |
-| `MARCELINOSRV_STATUS` | Caminho completo do JSON publicado no share público. | Calculado pelo instalador com base no `smb.conf`. |
+| `MARCELINOSRV_STATUS` | Caminho completo do JSON publicado no share Monitor. | `WEB_STATUS`, padrão `/srv/app/monitor/.marcelinoSrv.json`. |
 | `MARCELINOSRV_INTERVAL` | Intervalo entre coletas, em segundos. | `5` |
 | `MARCELINOSRV_FILE_MODE` | Permissões Unix do JSON, em octal. | `0644` |
 
@@ -223,7 +229,7 @@ Variáveis `WEB_*` no topo do `nas-setup.sh`:
 |---|---|
 | `WEB_ENABLE` | `yes` instala o dashboard. |
 | `WEB_PORT` | Porta do serviço (portas abaixo de 1024 funcionam via `CAP_NET_BIND_SERVICE`). |
-| `WEB_STATUS` | JSON do `marcelinoServer` (padrão `/srv/nas/monitor/.marcelinoSrv.json`). |
+| `WEB_STATUS` | JSON do `marcelinoServer` (padrão `/srv/app/monitor/.marcelinoSrv.json`), também usado ao instalar o agente. |
 | `WEB_USER` | Usuário de sistema sem privilégios que executa o serviço. |
 | `WEB_ADMIN` | Usuário web inicial; padrão `USER_NAME`, com a senha `USER_PASSWORD`. Vazio = cadastre depois. |
 | `WEB_TLS` | `yes` gera certificado autoassinado e serve HTTPS; o navegador mostra um aviso na primeira visita. |

@@ -8,13 +8,13 @@ set -euo pipefail
 ###############################################################################
 
 # --- Rede ---
+LAN_INTERFACE="eth0"               # interface de rede local do NAS
 IP_INET="192.168.0.1"              # endereço IP da interface de rede do NAS
 IP_GATEWAY="192.168.0.254"         # gateway/roteador de internet da interface de rede do NAS
-IP_RANGE_START="192.168.0.100"     # início do intervalo DHCP
-IP_RANGE_END="192.168.0.200"       # fim do intervalo DHCP
 LAN_NETMASK="255.255.255.0"        # máscara de rede local do NAS
 LAN_CIDR=""                        # rede local em formato CIDR, empty = será calculado a partir de LAN_NETMASK
-LAN_INTERFACE="eth0"               # interface de rede local do NAS
+IP_RANGE_START="192.168.0.100"     # início do intervalo DHCP
+IP_RANGE_END="192.168.0.200"       # fim do intervalo DHCP
 DNS_UPSTREAM=("1.1.1.1" "9.9.9.9") # resolvedores externos (Cloudflare e Quad9)
 LOCAL_DOMAIN="lan"                 # domínio local usado para configuração de rede e Samba
 
@@ -39,6 +39,9 @@ RAID_MOUNTPOINT="/srv/nas"
 # Opções: ext4, xfs ou btrfs.
 RAID_FILESYSTEM="ext4"
 
+# --- Armazenamento de aplicativos ---
+APP_STORAGE="/srv/app"
+
 # --- Criptografia (LUKS) ---
 # Deixe CRYPT_DEVICE vazio para NÃO usar criptografia.
 CRYPT_DEVICE="/dev/md0"            # ex.: "/dev/md0" (ou outra partição/disco)
@@ -55,8 +58,8 @@ SHARES=(
   "Backup:/srv/nas/backup"
   "Midia:/srv/nas/midia"
   "${USER_NAME^}:$USER_HOME"
-  "Monitor:/srv/nas/monitor"
-  "Anytype:/srv/nas/anytype"
+  "Monitor:$APP_STORAGE/monitor"
+  "Anytype:$APP_STORAGE/anytype"
 )
 PUBLIC_SHARES=("Publico")                          # nomes de shares acessíveis sem senha (guest)
 GROUP_SHARES=("Backup" "Midia")                    # shares acessíveis ao grupo SAMBA_GROUP
@@ -115,7 +118,7 @@ SPEEDTEST_GRAPH_TIME="23:55"                             # horário do gráfico 
 # --- Dashboard web (marcelinoWeb) ---
 WEB_ENABLE="yes"                                         # yes = instala o dashboard com login
 WEB_PORT=443                                             # porta HTTP (acessível somente pela LAN)
-WEB_STATUS="/srv/nas/monitor/.marcelinoSrv.json"         # JSON publicado pelo marcelinoServer
+WEB_STATUS="$APP_STORAGE/monitor/.marcelinoSrv.json"         # JSON publicado pelo marcelinoServer
 WEB_USER="marcelinoweb"                                  # usuário de sistema que executa o serviço
 WEB_ADMIN="$USER_NAME"                                   # usuário web inicial (usa USER_PASSWORD; vazio = cadastre depois com marcelinoWeb useradd)
 WEB_TLS="yes"                                            # yes = gera certificado autoassinado e usa HTTPS
@@ -123,7 +126,7 @@ WEB_TLS="yes"                                            # yes = gera certificad
 # --- Anytype (sync host local) ---
 ANYTYPE_ENABLE="yes"
 ANYTYPE_IMAGE="ghcr.io/grishy/any-sync-bundle:1.7.0-2026-10-12"
-ANYTYPE_DATA="/srv/nas/anytype"
+ANYTYPE_DATA="$APP_STORAGE/anytype"
 ANYTYPE_HOST="$NAS_IP"
 
 # --- DLNA (servidor de mídia) ---
@@ -133,8 +136,8 @@ DLNA_MEDIA_DIR="/srv/nas/midia"
 DLNA_MEDIA_MUSIC="$DLNA_MEDIA_DIR/Music"
 DLNA_MEDIA_VIDEO="$DLNA_MEDIA_DIR/Video"
 DLNA_MEDIA_PICTURES="$DLNA_MEDIA_DIR/Pictures"
-DLNA_CACHE="/srv/nas/midia/.dlna.cache"
-DLNA_DB="/srv/nas/midia/.dlna.db"
+DLNA_CACHE="$APP_STORAGE/dlna/.dlna.cache"
+DLNA_DB="$APP_STORAGE/dlna/.dlna.db"
 DLNA_LOG="/var/log/minidlna/minidlna.log"
 
 ###############################################################################
@@ -198,8 +201,8 @@ purge_packages() {
 }
 
 ensure_firewall() {
-  ensure_packages ufw
   [[ "$FIREWALL_READY" != "yes" ]] || return 0
+  ensure_packages ufw
   "$SBIN_DIR/ufw" default deny incoming
   "$SBIN_DIR/ufw" default allow outgoing
   if systemctl is-active --quiet ssh \
@@ -211,7 +214,6 @@ ensure_firewall() {
 
 firewall_allow() {
   local protocol=$1 port=$2 comment=$3
-  ensure_firewall
   "$SBIN_DIR/ufw" allow from "$LAN_CIDR" to any port "$port" proto "$protocol" comment "$comment"
   "$SBIN_DIR/ufw" --force enable
 }
@@ -223,7 +225,6 @@ firewall_delete() {
 }
 
 firewall_allow_dhcp() {
-  ensure_firewall
   detect_iface
   "$SBIN_DIR/ufw" allow in on "$NET_IFACE" to any port 67 proto udp comment 'NAS DHCP'
   "$SBIN_DIR/ufw" --force enable
@@ -252,6 +253,7 @@ Serviços:
   --ntp / --uninstall-ntp
   --dns / --uninstall-dns       DNS e DHCP (dnsmasq)
   --speedtest / --uninstall-speedtest
+  --marcelino-server / --uninstall-marcelino-server
   --web / --uninstall-web
   --anytype / --uninstall-anytype
   --ssh / --uninstall-ssh
@@ -280,30 +282,59 @@ setup_user() {
   ensure_packages samba
   [[ -n "$USER_NAME" ]] || die "USER_NAME vazio."
   [[ "$USER_NAME" =~ ^[a-z_][a-z0-9_-]{0,31}$ ]] || die "USER_NAME inválido: $USER_NAME."
-  [[ -n "$USER_PASSWORD" && "$USER_PASSWORD" != "sua_senha_aqui" ]] \
-    || die "Defina USER_PASSWORD no topo do script."
-  [[ ${#USER_PASSWORD} -ge 8 ]] || die "USER_PASSWORD deve ter ao menos 8 caracteres."
+  local create_user="no" create_samba_user="no" samba_users user_groups
+  id "$USER_NAME" >/dev/null 2>&1 || create_user="yes"
+  samba_users=$(pdbedit -L) || die "Não foi possível consultar os usuários Samba."
+  if ! grep -q "^$USER_NAME:" <<< "$samba_users"; then
+    create_samba_user="yes"
+  fi
+  if [[ "$create_user" == "yes" || "$create_samba_user" == "yes" ]]; then
+    [[ -n "$USER_PASSWORD" && "$USER_PASSWORD" != "sua_senha_aqui" ]] \
+      || die "Defina USER_PASSWORD no topo do script para cadastrar o usuário."
+    [[ ${#USER_PASSWORD} -ge 8 ]] || die "USER_PASSWORD deve ter ao menos 8 caracteres."
+  fi
   log "Configurando usuário $USER_NAME..."
 
   getent group "$SAMBA_GROUP" >/dev/null || "$SBIN_DIR/groupadd" "$SAMBA_GROUP"
-  if ! id "$USER_NAME" >/dev/null 2>&1; then
+  if [[ "$create_user" == "yes" ]]; then
     "$SBIN_DIR/useradd" -M -d "$USER_HOME" -s /bin/bash -G "$SAMBA_GROUP" "$USER_NAME"
   else
-    "$SBIN_DIR/usermod" -d "$USER_HOME" -aG "$SAMBA_GROUP" "$USER_NAME"
+    log "Usuário Linux $USER_NAME já existe; preservando home e senha."
+    user_groups=$(id -nG "$USER_NAME")
+    if [[ " $user_groups " != *" $SAMBA_GROUP "* ]]; then
+      gpasswd -a "$USER_NAME" "$SAMBA_GROUP"
+    fi
   fi
   mkdir -p "$USER_HOME"
   chown "$USER_NAME":"$(id -gn "$USER_NAME")" "$USER_HOME"
-  printf '%s:%s\n' "$USER_NAME" "$USER_PASSWORD" | "$SBIN_DIR/chpasswd"
-  printf '%s\n%s\n' "$USER_PASSWORD" "$USER_PASSWORD" | smbpasswd -s -a "$USER_NAME" >/dev/null
+  if [[ "$create_user" == "yes" ]]; then
+    printf '%s:%s\n' "$USER_NAME" "$USER_PASSWORD" | "$SBIN_DIR/chpasswd"
+  fi
+  if [[ "$create_samba_user" == "yes" ]]; then
+    printf '%s\n%s\n' "$USER_PASSWORD" "$USER_PASSWORD" | smbpasswd -s -a "$USER_NAME" >/dev/null
+  else
+    log "Usuário Samba $USER_NAME já existe; preservando cadastro e senha."
+  fi
   USER_READY=1
 }
 
+storage_is_configured() {
+  local storage_mountpoint="$RAID_MOUNTPOINT"
+  [[ -z "$CRYPT_DEVICE" ]] || storage_mountpoint="$CRYPT_MOUNTPOINT"
+  mountpoint -q "$storage_mountpoint" \
+    || findmnt --fstab --noheadings --mountpoint "$storage_mountpoint" >/dev/null 2>&1
+}
+
 setup_raid() {
-  ensure_packages mdadm
+  if storage_is_configured; then
+    warn "Armazenamento já montado ou registrado no fstab; pulando configuração do RAID."
+    return
+  fi
   if [[ -e "$RAID_DEVICE" ]]; then
     warn "$RAID_DEVICE já existe; pulando criação do RAID."
     return
   fi
+  ensure_packages mdadm
   [[ ${#RAID_DEVICES[@]} -ge 1 ]] || die "RAID_DEVICES vazio."
   warn "Todos os dados serão APAGADOS em: ${RAID_DEVICES[*]}"
   read -rp "Digite 'SIM' para continuar: " ans
@@ -347,6 +378,10 @@ format_raid_filesystem() {
 }
 
 setup_storage() {
+  if storage_is_configured; then
+    warn "Armazenamento já montado ou registrado no fstab; pulando configuração de storage."
+    return
+  fi
   ensure_packages e2fsprogs util-linux
   case "$RAID_FILESYSTEM" in
     xfs) ensure_packages xfsprogs ;;
@@ -860,6 +895,49 @@ EOF
   systemctl enable --now nas-speedtest.timer nas-speedtest-graph.timer
 }
 
+setup_marcelino_server() {
+  local dir config_tmp
+  dir="$(dirname "$(readlink -f "$0")")"
+  [[ -f "$dir/marcelinoServer.py" && -f "$dir/marcelinoServer.service" ]] \
+    || die "marcelinoServer.py/.service não encontrados em $dir."
+  [[ "$WEB_STATUS" == /* && "$WEB_STATUS" != *[[:space:]\"\\%]* ]] \
+    || die "WEB_STATUS deve ser um caminho absoluto sem espaços, aspas, barras invertidas ou %."
+  command -v systemctl >/dev/null 2>&1 || die "O servidor requer systemd."
+  ensure_packages python3 python3-psutil smartmontools
+  log "Instalando marcelinoServer..."
+  install -d -o root -g root -m 0755 /opt/marcelinoServer /etc/default
+  mkdir -p "$(dirname "$WEB_STATUS")"
+  install -o root -g root -m 0644 "$dir/marcelinoServer.py" /opt/marcelinoServer/marcelinoServer.py
+  install -o root -g root -m 0644 "$dir/marcelinoServer.service" /etc/systemd/system/marcelinoServer.service
+  if [[ ! -f /etc/default/marcelinoServer ]]; then
+    cat > /etc/default/marcelinoServer <<'EOF'
+MARCELINOSRV_INTERVAL=5
+MARCELINOSRV_FILE_MODE=0644
+EOF
+    chown root:root /etc/default/marcelinoServer
+    chmod 0644 /etc/default/marcelinoServer
+  fi
+  config_tmp=$(mktemp /etc/default/marcelinoServer.XXXXXX)
+  awk -v status_path="$WEB_STATUS" '
+    /^MARCELINOSRV_(SCRIPT|STATUS)=/ { next }
+    { print }
+    END {
+      print "MARCELINOSRV_SCRIPT=/opt/marcelinoServer/marcelinoServer.py"
+      print "MARCELINOSRV_STATUS=" status_path
+    }
+  ' /etc/default/marcelinoServer > "$config_tmp"
+  chown --reference=/etc/default/marcelinoServer "$config_tmp"
+  chmod --reference=/etc/default/marcelinoServer "$config_tmp"
+  mv "$config_tmp" /etc/default/marcelinoServer
+  if command -v systemd-analyze >/dev/null 2>&1; then
+    systemd-analyze verify /etc/systemd/system/marcelinoServer.service
+  fi
+  systemctl daemon-reload
+  systemctl enable marcelinoServer.service
+  systemctl restart marcelinoServer.service
+  log "Métricas publicadas em $WEB_STATUS."
+}
+
 setup_web() {
   [[ "$WEB_ENABLE" == "yes" ]] || return 0
   ensure_packages python3 sudo
@@ -1092,6 +1170,15 @@ uninstall_speedtest() {
   systemctl daemon-reload
 }
 
+uninstall_marcelino_server() {
+  systemctl disable --now marcelinoServer.service 2>/dev/null || true
+  rm -f /etc/systemd/system/marcelinoServer.service
+  rm -f /opt/marcelinoServer/marcelinoServer.py
+  rmdir /opt/marcelinoServer 2>/dev/null || true
+  systemctl daemon-reload
+  log "Configuração em /etc/default/marcelinoServer e métricas preservadas."
+}
+
 uninstall_web() {
   systemctl disable --now marcelinoWeb.service 2>/dev/null || true
   rm -f /etc/systemd/system/marcelinoWeb.service /etc/default/marcelinoWeb /usr/local/bin/marcelinoWeb
@@ -1165,6 +1252,7 @@ while [[ $# -gt 0 ]]; do
     --ntp)       SELECTED_STEPS+=(ntp) ;;
     --dns)       SELECTED_STEPS+=(dns) ;;
     --speedtest) SELECTED_STEPS+=(speedtest) ;;
+    --marcelino-server) SELECTED_STEPS+=(marcelino_server) ;;
     --web)       SELECTED_STEPS+=(web) ;;
     --anytype)   SELECTED_STEPS+=(anytype) ;;
     --ssh)       SELECTED_STEPS+=(ssh) ;;
@@ -1174,6 +1262,7 @@ while [[ $# -gt 0 ]]; do
     --uninstall-ntp|--unistall-ntp) SELECTED_STEPS+=(uninstall_ntp); HAS_UNINSTALL="yes" ;;
     --uninstall-dns|--unistall-dns) SELECTED_STEPS+=(uninstall_dns); HAS_UNINSTALL="yes" ;;
     --uninstall-speedtest|--unistall-speedtest) SELECTED_STEPS+=(uninstall_speedtest); HAS_UNINSTALL="yes" ;;
+    --uninstall-marcelino-server|--unistall-marcelino-server) SELECTED_STEPS+=(uninstall_marcelino_server); HAS_UNINSTALL="yes" ;;
     --uninstall-web|--unistall-web) SELECTED_STEPS+=(uninstall_web); HAS_UNINSTALL="yes" ;;
     --uninstall-anytype|--unistall-anytype) SELECTED_STEPS+=(uninstall_anytype); HAS_UNINSTALL="yes" ;;
     --uninstall-ssh|--unistall-ssh) SELECTED_STEPS+=(uninstall_ssh); HAS_UNINSTALL="yes" ;;
@@ -1199,6 +1288,7 @@ fi
 NEEDS_LAN="no"
 for step in "${SELECTED_STEPS[@]}"; do
   case "$step" in
+    marcelino_server|uninstall_marcelino_server) ;;
     samba|discovery|ntp|dns|speedtest|web|anytype|ssh|dlna|uninstall_*) NEEDS_LAN="yes" ;;
   esac
 done
@@ -1209,19 +1299,33 @@ if [[ "$NEEDS_LAN" == "yes" ]]; then
 fi
 
 if [[ "$RUN_ALL" == "yes" ]]; then
-  SELECTED_STEPS=(network raid storage user ssh samba discovery ntp dns speedtest web anytype dlna)
+  SELECTED_STEPS=(network raid storage user ssh samba discovery ntp dns speedtest marcelino_server web anytype dlna)
 fi
 
 # Executa na ordem canônica, independentemente da ordem dos argumentos
 ORDERED_STEPS=()
-for s in network raid storage user ssh samba discovery ntp dns speedtest web anytype dlna \
+for s in network raid storage user ssh samba discovery ntp dns speedtest marcelino_server web anytype dlna \
   uninstall_samba uninstall_discovery uninstall_ntp uninstall_dns uninstall_speedtest \
-  uninstall_web uninstall_anytype uninstall_ssh uninstall_dlna; do
+  uninstall_marcelino_server uninstall_web uninstall_anytype uninstall_ssh uninstall_dlna; do
   for step in "${SELECTED_STEPS[@]}"; do
     [[ "$step" == "$s" ]] && ORDERED_STEPS+=("$s")
   done
 done
 SELECTED_STEPS=("${ORDERED_STEPS[@]}")
+
+for step in "${SELECTED_STEPS[@]}"; do
+  case "$step" in
+    samba|discovery|ssh) ;;
+    ntp)     [[ "$NTP_ENABLE" == "yes" ]] || continue ;;
+    dns)     [[ "$DNS_ENABLE" == "yes" || "$DHCP_ENABLE" == "yes" ]] || continue ;;
+    web)     [[ "$WEB_ENABLE" == "yes" ]] || continue ;;
+    anytype) [[ "$ANYTYPE_ENABLE" == "yes" ]] || continue ;;
+    dlna)    [[ "$DLNA_ENABLE" == "yes" ]] || continue ;;
+    *) continue ;;
+  esac
+  ensure_firewall
+  break
+done
 
 for step in "${SELECTED_STEPS[@]}"; do
   case "$step" in
@@ -1234,6 +1338,7 @@ for step in "${SELECTED_STEPS[@]}"; do
     ntp)       setup_ntp ;;
     dns)       setup_dns ;;
     speedtest) setup_speedtest ;;
+    marcelino_server) setup_marcelino_server ;;
     web)       setup_web ;;
     anytype)   setup_anytype ;;
     ssh)       setup_ssh ;;
@@ -1243,13 +1348,17 @@ for step in "${SELECTED_STEPS[@]}"; do
     uninstall_ntp)      uninstall_ntp ;;
     uninstall_dns)      uninstall_dns ;;
     uninstall_speedtest) uninstall_speedtest ;;
+    uninstall_marcelino_server) uninstall_marcelino_server ;;
     uninstall_web)       uninstall_web ;;
     uninstall_anytype)   uninstall_anytype ;;
     uninstall_ssh)       uninstall_ssh ;;
     uninstall_dlna)      uninstall_dlna ;;
   esac
+  if [[ "$step" == uninstall_* ]]; then
+    DEBIAN_FRONTEND=noninteractive apt-get autoremove -y
+  fi
 done
 
 if [[ "$RUN_ALL" == "yes" ]]; then
-  log "NAS configurado. Acesse: \\\\$(hostname)\\ (Windows) ou smb://$(hostname).local (Linux)."
+  log "NAS configurado. Acesse: \\\\$(hostname)\\ (Windows) ou smb://$(hostname).$(LOCAL_DOMAIN) (Linux)."
 fi
