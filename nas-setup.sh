@@ -1,58 +1,58 @@
 #!/usr/bin/env bash
-# Configura um NAS ( Network Attached Storage) com RAID, criptografia, Samba, DNS/DHCP e firewall.
-# Uso: sudo ./nas-setup.sh
+# Configures a NAS (Network Attached Storage) with RAID, encryption, Samba, DNS/DHCP, and a firewall.
+# Usage: sudo ./nas-setup.sh
 set -euo pipefail
 
 ###############################################################################
-# CONFIGURAÇÃO
+# CONFIGURATION
 ###############################################################################
 
-# --- Rede ---
-LAN_INTERFACE="eth0"               # interface de rede local do NAS
-IP_INET="192.168.0.1"              # endereço IP da interface de rede do NAS
-IP_GATEWAY="192.168.0.254"         # gateway/roteador de internet da interface de rede do NAS
-LAN_NETMASK="255.255.255.0"        # máscara de rede local do NAS
-LAN_CIDR=""                        # rede local em formato CIDR, empty = será calculado a partir de LAN_NETMASK
-IP_RANGE_START="192.168.0.100"     # início do intervalo DHCP
-IP_RANGE_END="192.168.0.200"       # fim do intervalo DHCP
-DNS_UPSTREAM=("1.1.1.1" "9.9.9.9") # resolvedores externos (Cloudflare e Quad9)
-LOCAL_DOMAIN="lan"                 # domínio local usado para configuração de rede e Samba
+# --- Network ---
+LAN_INTERFACE=""                   # NAS LAN interface; empty = detected automatically
+IP_INET="192.168.0.1"              # IP address of the NAS network interface
+IP_GATEWAY="192.168.0.254"         # Internet gateway/router for the NAS network interface
+LAN_NETMASK="255.255.255.0"        # NAS local network mask
+LAN_CIDR=""                        # Local network in CIDR format; empty = calculated from LAN_NETMASK
+IP_RANGE_START="192.168.0.100"     # DHCP range start
+IP_RANGE_END="192.168.0.200"       # DHCP range end
+DNS_UPSTREAM=("1.1.1.1" "9.9.9.9") # External resolvers (Cloudflare and Quad9)
+LOCAL_DOMAIN="lan"                 # Local domain used for network and Samba configuration
 
-# --- Armazenamentos ---
+# --- Storage ---
 APP_STORAGE="/srv/app"
 NAS_STORAGE="/srv/nas"
 
-# --- Usuário principal do NAS ---
-USER_NAME="meneceu"                 # usuário principal do NAS
-USER_PASSWORD=""                    # senha do usuário principal; vazio = solicitar no terminal
-USER_HOME="$NAS_STORAGE/$USER_NAME" # diretório home do usuário principal do NAS (o share Samba usa o nome com a primeira letra maiúscula)
+# --- Primary NAS user ---
+USER_NAME="meneceu"                 # Primary NAS user
+USER_PASSWORD=""                    # Primary user password; empty = prompt in the terminal
+USER_HOME="$NAS_STORAGE/$USER_NAME" # Primary NAS user's home directory (the Samba share capitalizes the first letter)
 
-# --- Sistema ---
-SBIN_DIR="/sbin"                    # diretório dos executáveis administrativos
+# --- System ---
+SBIN_DIR="/sbin"                    # Administrative executable directory
 
 # --- RAID ---
-RAID_DEVICES=(/dev/sdb /dev/sdc)   # discos/partições que farão parte do RAID
+RAID_DEVICES=(/dev/sdb /dev/sdc)   # Disks/partitions that will be part of the RAID
 RAID_LEVEL=1                       # 0 (for performance), 1 (mirroring), 5 (striping with parity), 6 (dual parity), 10 (mirrored striping)
 RAID_DEVICE="/dev/md0"             # dispositivo RAID a ser criado
 
-# --- Sistema de arquivos sem criptografia ---
-# Usado somente quando CRYPT_DEVICE estiver vazio.
+# --- Unencrypted filesystem ---
+# Used only when CRYPT_DEVICE is empty.
 RAID_MOUNTPOINT="$NAS_STORAGE"
 
-# --- Sistema de arquivos do volume RAID (ou do volume dentro do LUKS) ---
-# Opções: ext4, xfs ou btrfs.
+# --- RAID volume filesystem (or filesystem inside LUKS) ---
+# Options: ext4, xfs, or btrfs.
 RAID_FILESYSTEM="ext4"
 
-# --- Criptografia (LUKS) ---
-# Deixe CRYPT_DEVICE vazio para NÃO usar criptografia.
-CRYPT_DEVICE="/dev/md0"            # ex.: "/dev/md0" (ou outra partição/disco)
-CRYPT_MOUNTPOINT="$NAS_STORAGE"        # ponto de montagem do volume descriptografado
-CRYPT_KEYFILE="/etc/nas.key"       # ex.: "/root/nas.key". Vazio = não gera keyfile (senha digitada)
-CRYPT_AUTO_UNLOCK="yes"            # yes = descriptografa e monta no boot; no = manual
-CRYPT_NAME="nas_crypt"             # nome do mapeamento em /dev/mapper
+# --- Encryption (LUKS) ---
+# Leave CRYPT_DEVICE empty to disable encryption.
+CRYPT_DEVICE="/dev/md0"            # e.g. "/dev/md0" (or another partition/disk)
+CRYPT_MOUNTPOINT="$NAS_STORAGE"        # Mount point for the decrypted volume
+CRYPT_KEYFILE="/etc/nas.key"       # e.g. "/root/nas.key". Empty = do not create a keyfile (prompt for password)
+CRYPT_AUTO_UNLOCK="yes"            # yes = decrypt and mount at boot; no = manual
+CRYPT_NAME="nas_crypt"             # Mapping name under /dev/mapper
 
 # --- Samba ---
-# Formato: "nome_do_share:/caminho/do/diretorio"
+# Format: "share_name:/path/to/directory"
 SHARES=(
   "Publico:$NAS_STORAGE/publico"
   "Privado:$NAS_STORAGE/privado"
@@ -62,35 +62,35 @@ SHARES=(
   "Monitor:$APP_STORAGE/monitor"
   "Anytype:$APP_STORAGE/anytype"
 )
-PUBLIC_SHARES=("Publico")                          # nomes de shares acessíveis sem senha (guest)
-GROUP_SHARES=("Backup" "Midia")                    # shares acessíveis ao grupo SAMBA_GROUP
-READONLY_SHARES=("Monitor")                        # shares visíveis, somente leitura (gravados localmente pelo marcelinoServer)
+PUBLIC_SHARES=("Publico")                          # Share names accessible without a password (guest)
+GROUP_SHARES=("Backup" "Midia")                    # Shares accessible to the SAMBA_GROUP group
+READONLY_SHARES=("Monitor")                        # Visible, read-only shares (written locally by marcelinoServer)
 USER_SHARES=("${USER_NAME^}:$USER_NAME" 
              "Privado:$USER_NAME" 
-             "Anytype:$USER_NAME")                 # pares share:usuario acessíveis somente por esse usuário
-SAMBA_USER="$USER_NAME"                            # usuário Samba (criado se não existir)
-SAMBA_GROUP="nasgroup"                             # grupo Samba (criado se não existir)
-WORKGROUP="WORKGROUP"                              # grupo de trabalho do Samba
-DOMAIN="$LOCAL_DOMAIN"                             # domínio da rede local (para Samba)
+             "Anytype:$USER_NAME")                 # share:user pairs accessible only to that user
+SAMBA_USER="$USER_NAME"                            # Samba user (created if it does not exist)
+SAMBA_GROUP="nasgroup"                             # Samba group (created if it does not exist)
+WORKGROUP="WORKGROUP"                              # Samba workgroup
+DOMAIN="$LOCAL_DOMAIN"                             # Local network domain (for Samba)
 
-# --- IP estático ---
-NET_STATIC="yes"                   # yes = configura IP estático no Debian
-NAS_IP="$IP_INET"                  # endereço IP do NAS (também usado como DNS/DHCP)
-NAS_PREFIX=24                      # tamanho da máscara (24 = 255.255.255.0)
-NET_IFACE=""                       # interface de rede. Vazio = detecta pela rota padrão
-NET_GATEWAY="$IP_GATEWAY"          # gateway/roteador de internet. Vazio = usa o gateway atual
+# --- Static IP ---
+NET_STATIC="yes"                   # yes = configure a static IP on Debian
+NAS_IP="$IP_INET"                  # NAS IP address (also used for DNS/DHCP)
+NAS_PREFIX=24                      # Network prefix length (24 = 255.255.255.0)
+NET_IFACE=""                       # Network interface. Empty = detect from the default route
+NET_GATEWAY="$IP_GATEWAY"          # Internet gateway/router. Empty = use the current gateway
 
-# --- DNS (dnsmasq) com filtro de anúncios, rastreadores e malware ---
+# --- DNS (dnsmasq) with ad, tracker, and malware filtering ---
 DNS_ENABLE="yes"
-# Resolvedores efetivos: DNS_UPSTREAM; se vazio, usa Cloudflare e Quad9
+# Effective resolvers: DNS_UPSTREAM; if empty, use Cloudflare and Quad9
 DNS_UPSTREAM_int=("1.1.1.1" "9.9.9.9")
 [[ -z "${DNS_UPSTREAM[*]:-}" ]] || DNS_UPSTREAM_int=("${DNS_UPSTREAM[@]}")
-DNS_DOMAIN="$LOCAL_DOMAIN"         # domínio local entregue aos clientes
-# Listas em formato hosts ou dnsmasq (local=/dominio/)
+DNS_DOMAIN="$LOCAL_DOMAIN"         # Local domain provided to clients
+# Lists in hosts or dnsmasq format (local=/domain/)
 DNS_BLOCKLISTS=(
-  "https://raw.githubusercontent.com/StevenBlack/hosts/master/hosts"                    # anúncios + malware
-  "https://raw.githubusercontent.com/hagezi/dns-blocklists/main/dnsmasq/pro.txt"        # anúncios, rastreadores, spyware
-  "https://raw.githubusercontent.com/hagezi/dns-blocklists/main/dnsmasq/tif.medium.txt" # ameaças (malware, phishing)
+  "https://raw.githubusercontent.com/StevenBlack/hosts/master/hosts"                    # Ads + malware
+  "https://raw.githubusercontent.com/hagezi/dns-blocklists/main/dnsmasq/pro.txt"        # Ads, trackers, spyware
+  "https://raw.githubusercontent.com/hagezi/dns-blocklists/main/dnsmasq/tif.medium.txt" # Threats (malware, phishing)
 )
 
 # --- DHCP (dnsmasq) ---
@@ -100,38 +100,42 @@ DHCP_RANGE_END="$IP_RANGE_END"
 DHCP_LEASE="12h"
 
 # --- SSH (Secure Shell) ---
-SSH_PORT=22                        # porta SSH do servidor NAS
-SSH_MAX_SESSION=600                # segundos de inatividade até encerrar a sessão SSH (10 min)
-SSH_ALLOW_ROOT="no"                # yes = permite login SSH como root, no = apenas usuários normais
-SSH_PASSWORD_AUTH="yes"            # yes = permite autenticação por senha, no = apenas chaves SSH
-SSH_BANNER="yes"                   # mensagem exibida no login SSH (opcional)
+SSH_PORT=22                        # NAS server SSH port
+SSH_MAX_SESSION=600                # Idle seconds before closing the SSH session (10 min)
+SSH_ALLOW_ROOT="no"                # yes = allow SSH login as root; no = regular users only
+SSH_PASSWORD_AUTH="yes"            # yes = allow password authentication; no = SSH keys only
+SSH_BANNER="yes"                   # Optional message displayed at SSH login
 
-# --- NTP (servidor de horário para a rede local) ---
-NTP_ENABLE="yes"                              # yes = instala e configura o chrony como servidor NTP da LAN
-NTP_UPSTREAM=("pool.ntp.br" "a.st1.ntp.br")   # fontes de horário externas
+# --- NTP (local network time server) ---
+NTP_ENABLE="yes"                              # yes = install and configure chrony as the LAN NTP server
+NTP_UPSTREAM=("pool.ntp.br" "a.st1.ntp.br")   # External time sources
 
-# --- Teste de velocidade da internet ---
-SPEEDTEST_ENABLE="yes"                                  # yes = instala nas-speedtest e os timers
-SPEEDTEST_LOG="/var/log/nas-speedtest.jsonl"             # log dos testes
-SPEEDTEST_OUT="$USER_HOME/internet_test"        # gráficos salvos em ano/mes dentro desta pasta
-SPEEDTEST_GRAPH_TIME="23:55"                             # horário do gráfico diário (últimas 24 horas)
+# --- Internet speed test ---
+SPEEDTEST_ENABLE="yes"                                  # yes = install nas-speedtest and its timers
+SPEEDTEST_LOG="/var/log/nas-speedtest.jsonl"             # Test log
+SPEEDTEST_OUT="$USER_HOME/internet_test"        # Charts saved in year/month subdirectories here
+SPEEDTEST_GRAPH_TIME="23:55"                             # Daily chart time (last 24 hours)
 
-# --- Dashboard web (marcelinoWeb) ---
-WEB_ENABLE="yes"                                         # yes = instala o dashboard com login
-WEB_PORT=443                                             # porta HTTP (acessível somente pela LAN)
-WEB_STATUS="$APP_STORAGE/monitor/.marcelinoSrv.json"         # JSON publicado pelo marcelinoServer
-WEB_USER="marcelinoweb"                                  # usuário de sistema que executa o serviço
-WEB_ADMIN="$USER_NAME"                                   # usuário web inicial (usa USER_PASSWORD; vazio = cadastre depois com marcelinoWeb useradd)
-WEB_TLS="yes"                                            # yes = gera certificado autoassinado e usa HTTPS
+# --- Web dashboard (marcelinoWeb) ---
+WEB_ENABLE="yes"                                         # yes = install the dashboard with login
+WEB_PORT=443                                             # HTTP port (LAN access only)
+WEB_STATUS="$APP_STORAGE/monitor/.marcelinoSrv.json"         # JSON published by marcelinoServer
+WEB_USER="marcelinoweb"                                  # System user that runs the service
+WEB_ADMIN="$USER_NAME"                                   # Initial web user (uses USER_PASSWORD; empty = add later with marcelinoWeb useradd)
+WEB_TLS="yes"                                            # yes = generate a self-signed certificate and use HTTPS
 
-# --- Anytype (sync host local) ---
+# --- Anytype (local sync host) ---
 ANYTYPE_ENABLE="yes"
 ANYTYPE_IMAGE="ghcr.io/grishy/any-sync-bundle:1.7.0-2026-10-12"
 ANYTYPE_DATA="$APP_STORAGE/anytype"
 ANYTYPE_BACKUP="$NAS_STORAGE/backup/anytype"
 ANYTYPE_HOST="$NAS_IP"
 
-# --- DLNA (servidor de mídia) ---
+# --- Syncthing ---
+SYNCTHING_ENABLE="yes"
+SYNCTHING_HOME="$APP_STORAGE/syncthing"    # Configuration, identity, and index database
+
+# --- DLNA (media server) ---
 DLNA_ENABLE="yes"
 DLNA_PORT=8200
 DLNA_MEDIA_DIR="$NAS_STORAGE/midia"
@@ -143,7 +147,7 @@ DLNA_DB="$APP_STORAGE/dlna/.dlna.db"
 DLNA_LOG="/var/log/minidlna/minidlna.log"
 
 ###############################################################################
-# FUNÇÕES
+# FUNCTIONS
 ###############################################################################
 
 log()  { echo -e "\e[1;32m[+]\e[0m $*"; }
@@ -258,6 +262,7 @@ Serviços:
   --marcelino-server / --uninstall-marcelino-server
   --web / --uninstall-web
   --anytype / --uninstall-anytype
+  --syncthing / --uninstall-syncthing
   --ssh / --uninstall-ssh
   --dlna / --uninstall-dlna
   -h, --help                    Mostra esta ajuda
@@ -446,7 +451,7 @@ setup_storage() {
 
   sed -i "/^${CRYPT_NAME}[[:space:]]/d" /etc/crypttab 2>/dev/null || true
   if [[ "$CRYPT_AUTO_UNLOCK" == "yes" ]]; then
-    # Com keyfile abre sozinho; sem keyfile ("none") a senha é pedida no boot.
+    # With a keyfile it opens automatically; without one ("none"), prompt for the password at boot.
     echo "$CRYPT_NAME UUID=$luks_uuid $crypttab_key $crypttab_opts,nofail" >> /etc/crypttab
     add_fstab "$fs_uuid" "$CRYPT_MOUNTPOINT" "$RAID_FILESYSTEM" \
       "defaults,nofail,x-systemd.requires=systemd-cryptsetup@$CRYPT_NAME.service"
@@ -662,7 +667,7 @@ setup_network() {
     nmcli connection up "$con" || warn "Falha ao reativar a conexão; reinicie o sistema."
   elif [[ -f /etc/network/interfaces ]]; then
     cp -n /etc/network/interfaces /etc/network/interfaces.orig || true
-    # Remove configuração anterior da interface
+    # Remove the previous interface configuration
     sed -i -E "/^(auto|allow-hotplug|iface)[[:space:]]+$NET_IFACE([[:space:]]|\$)/,/^$/d" /etc/network/interfaces
     cat >> /etc/network/interfaces <<EOF
 
@@ -684,7 +689,7 @@ update_blocklist_script() {
   mkdir -p /var/lib/nas-dns
   cat > /usr/local/sbin/update-dns-blocklist <<EOF
 #!/usr/bin/env bash
-# Gerado por nas-setup.sh: baixa e consolida as listas de bloqueio do dnsmasq.
+# Generated by nas-setup.sh: downloads and consolidates dnsmasq blocklists.
 set -uo pipefail
 OUT=/var/lib/nas-dns/blocklist.hosts
 TMP=\$(mktemp)
@@ -739,7 +744,7 @@ setup_dns() {
   log "Configurando dnsmasq (DNS: $DNS_ENABLE, DHCP: $DHCP_ENABLE)..."
 
   if [[ "$DNS_ENABLE" == "yes" ]]; then
-    # systemd-resolved ocupa a porta 53
+    # systemd-resolved occupies port 53
     if systemctl is-enabled --quiet systemd-resolved 2>/dev/null \
       || systemctl is-active --quiet systemd-resolved 2>/dev/null; then
       mkdir -p /etc/nas-setup
@@ -749,7 +754,7 @@ setup_dns() {
   fi
 
   {
-    echo "# Gerado por nas-setup.sh"
+    echo "# Generated by nas-setup.sh"
     echo "interface=$NET_IFACE"
     echo "bind-interfaces"
     echo "domain-needed"
@@ -762,7 +767,7 @@ setup_dns() {
     echo "expand-hosts"
     echo "log-queries=extra"
     echo "log-dhcp"
-    # Evita que o /etc/hosts (127.0.1.1) seja entregue aos clientes como endereço do NAS
+    # Prevent /etc/hosts (127.0.1.1) from being provided to clients as the NAS address
     echo "host-record=$(hostname),$(hostname).$DNS_DOMAIN,$NAS_IP"
     local s
     for s in "${DNS_UPSTREAM_int[@]}"; do echo "server=$s"; done
@@ -793,7 +798,7 @@ setup_dns() {
     update_blocklist_script
     log "Baixando listas de bloqueio..."
     /usr/local/sbin/update-dns-blocklist || warn "Falha ao baixar as listas."
-    # O próprio NAS passa a usar o DNS local
+    # Make the NAS itself use the local DNS
     if [[ -L /etc/resolv.conf ]]; then rm -f /etc/resolv.conf; fi
     chattr -i /etc/resolv.conf 2>/dev/null || true
     printf 'nameserver 127.0.0.1\nsearch %s\n' "$DNS_DOMAIN" > /etc/resolv.conf
@@ -828,7 +833,7 @@ setup_ntp() {
   systemctl disable --now systemd-timesyncd 2>/dev/null || true
 
   {
-    echo "# Gerado por nas-setup.sh"
+    echo "# Generated by nas-setup.sh"
     local s
     for s in "${NTP_UPSTREAM[@]}"; do echo "pool $s iburst"; done
     cat <<EOF
@@ -1114,11 +1119,48 @@ EOF
   warn "O endereço anunciado é persistido no primeiro início; alterações posteriores exigem editar bundle-config.yml."
 }
 
+setup_syncthing() {
+  [[ "$SYNCTHING_ENABLE" == "yes" ]] || return 0
+  [[ "$SYNCTHING_HOME" == /* && "$SYNCTHING_HOME" != *[[:space:]\"\\%]* ]] \
+    || die "SYNCTHING_HOME deve ser um caminho absoluto sem espaços, aspas, barras invertidas ou %."
+  ensure_packages syncthing
+  setup_user
+  log "Configurando Syncthing para $USER_NAME..."
+  install -d -o "$USER_NAME" -g "$(id -gn "$USER_NAME")" -m 0700 "$SYNCTHING_HOME"
+  cat > /etc/systemd/system/nas-syncthing.service <<EOF
+[Unit]
+Description=Syncthing NAS
+Wants=network-online.target
+After=network-online.target
+RequiresMountsFor="$SYNCTHING_HOME" "$USER_HOME"
+
+[Service]
+User=$USER_NAME
+Group=$(id -gn "$USER_NAME")
+Environment=STNOUPGRADE=1
+UMask=0077
+ExecStart=/usr/bin/syncthing --no-browser --no-restart --home="$SYNCTHING_HOME" --gui-address=127.0.0.1:8384
+Restart=on-failure
+RestartSec=10
+SuccessExitStatus=3 4
+
+[Install]
+WantedBy=multi-user.target
+EOF
+  systemctl daemon-reload
+  systemctl enable nas-syncthing.service
+  systemctl restart nas-syncthing.service
+  firewall_allow tcp 22000 'NAS Syncthing sync'
+  firewall_allow udp 22000 'NAS Syncthing QUIC'
+  firewall_allow udp 21027 'NAS Syncthing discovery'
+  log "Syncthing iniciado. Painel local: http://127.0.0.1:8384 (use um túnel SSH)."
+}
+
 setup_ssh() {
   ensure_packages openssh-server
   log "Configurando SSH na porta $SSH_PORT..."
   cat > /etc/profile.d/ssh-timeout.sh <<EOF
-# Gerado por nas-setup.sh
+# Generated by nas-setup.sh
 TMOUT=$SSH_MAX_SESSION
 readonly TMOUT
 export TMOUT
@@ -1293,6 +1335,17 @@ uninstall_anytype() {
   log "Dados do Anytype preservados em $ANYTYPE_DATA e backups em $ANYTYPE_BACKUP."
 }
 
+uninstall_syncthing() {
+  systemctl disable --now nas-syncthing.service 2>/dev/null || true
+  rm -f /etc/systemd/system/nas-syncthing.service
+  firewall_delete tcp 22000
+  firewall_delete udp 22000
+  firewall_delete udp 21027
+  purge_packages syncthing
+  systemctl daemon-reload
+  log "Configuração e identidade preservadas em $SYNCTHING_HOME; pastas sincronizadas preservadas."
+}
+
 uninstall_ssh() {
   systemctl disable --now ssh 2>/dev/null || systemctl disable --now sshd 2>/dev/null || true
   rm -f /etc/profile.d/ssh-timeout.sh /etc/ssh/sshd_config.d/10-nas-setup.conf
@@ -1311,7 +1364,7 @@ uninstall_dlna() {
 }
 
 ###############################################################################
-# EXECUÇÃO
+# EXECUTION
 ###############################################################################
 
 WSDD_PKG=""
@@ -1339,6 +1392,7 @@ while [[ $# -gt 0 ]]; do
     --marcelino-server) SELECTED_STEPS+=(marcelino_server) ;;
     --web)       SELECTED_STEPS+=(web) ;;
     --anytype)   SELECTED_STEPS+=(anytype) ;;
+    --syncthing) SELECTED_STEPS+=(syncthing) ;;
     --ssh)       SELECTED_STEPS+=(ssh) ;;
     --dlna)      SELECTED_STEPS+=(dlna) ;;
     --uninstall-samba|--unistall-samba) SELECTED_STEPS+=(uninstall_samba); HAS_UNINSTALL="yes" ;;
@@ -1349,6 +1403,7 @@ while [[ $# -gt 0 ]]; do
     --uninstall-marcelino-server|--unistall-marcelino-server) SELECTED_STEPS+=(uninstall_marcelino_server); HAS_UNINSTALL="yes" ;;
     --uninstall-web|--unistall-web) SELECTED_STEPS+=(uninstall_web); HAS_UNINSTALL="yes" ;;
     --uninstall-anytype|--unistall-anytype) SELECTED_STEPS+=(uninstall_anytype); HAS_UNINSTALL="yes" ;;
+    --uninstall-syncthing|--unistall-syncthing) SELECTED_STEPS+=(uninstall_syncthing); HAS_UNINSTALL="yes" ;;
     --uninstall-ssh|--unistall-ssh) SELECTED_STEPS+=(uninstall_ssh); HAS_UNINSTALL="yes" ;;
     --uninstall-dlna|--unistall-dlna) SELECTED_STEPS+=(uninstall_dlna); HAS_UNINSTALL="yes" ;;
     -h|--help)   show_help; exit 0 ;;
@@ -1373,7 +1428,7 @@ NEEDS_LAN="no"
 for step in "${SELECTED_STEPS[@]}"; do
   case "$step" in
     marcelino_server|uninstall_marcelino_server) ;;
-    samba|discovery|ntp|dns|speedtest|web|anytype|ssh|dlna|uninstall_*) NEEDS_LAN="yes" ;;
+    samba|discovery|ntp|dns|speedtest|web|anytype|syncthing|ssh|dlna|uninstall_*) NEEDS_LAN="yes" ;;
   esac
 done
 [[ "$RUN_ALL" != "yes" ]] || NEEDS_LAN="yes"
@@ -1383,14 +1438,14 @@ if [[ "$NEEDS_LAN" == "yes" ]]; then
 fi
 
 if [[ "$RUN_ALL" == "yes" ]]; then
-  SELECTED_STEPS=(network raid storage user ssh samba discovery ntp dns speedtest marcelino_server web anytype dlna)
+  SELECTED_STEPS=(network raid storage user ssh samba discovery ntp dns speedtest marcelino_server web anytype syncthing dlna)
 fi
 
-# Executa na ordem canônica, independentemente da ordem dos argumentos
+# Run in canonical order, regardless of the argument order
 ORDERED_STEPS=()
-for s in network raid storage user ssh samba discovery ntp dns speedtest marcelino_server web anytype dlna \
+for s in network raid storage user ssh samba discovery ntp dns speedtest marcelino_server web anytype syncthing dlna \
   uninstall_samba uninstall_discovery uninstall_ntp uninstall_dns uninstall_speedtest \
-  uninstall_marcelino_server uninstall_web uninstall_anytype uninstall_ssh uninstall_dlna; do
+  uninstall_marcelino_server uninstall_web uninstall_anytype uninstall_syncthing uninstall_ssh uninstall_dlna; do
   for step in "${SELECTED_STEPS[@]}"; do
     [[ "$step" == "$s" ]] && ORDERED_STEPS+=("$s")
   done
@@ -1404,6 +1459,7 @@ for step in "${SELECTED_STEPS[@]}"; do
     dns)     [[ "$DNS_ENABLE" == "yes" || "$DHCP_ENABLE" == "yes" ]] || continue ;;
     web)     [[ "$WEB_ENABLE" == "yes" ]] || continue ;;
     anytype) [[ "$ANYTYPE_ENABLE" == "yes" ]] || continue ;;
+    syncthing) [[ "$SYNCTHING_ENABLE" == "yes" ]] || continue ;;
     dlna)    [[ "$DLNA_ENABLE" == "yes" ]] || continue ;;
     *) continue ;;
   esac
@@ -1425,6 +1481,7 @@ for step in "${SELECTED_STEPS[@]}"; do
     marcelino_server) setup_marcelino_server ;;
     web)       setup_web ;;
     anytype)   setup_anytype ;;
+    syncthing) setup_syncthing ;;
     ssh)       setup_ssh ;;
     dlna)      setup_dlna ;;
     uninstall_samba)     uninstall_samba ;;
@@ -1435,6 +1492,7 @@ for step in "${SELECTED_STEPS[@]}"; do
     uninstall_marcelino_server) uninstall_marcelino_server ;;
     uninstall_web)       uninstall_web ;;
     uninstall_anytype)   uninstall_anytype ;;
+    uninstall_syncthing) uninstall_syncthing ;;
     uninstall_ssh)       uninstall_ssh ;;
     uninstall_dlna)      uninstall_dlna ;;
   esac

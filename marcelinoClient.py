@@ -1,7 +1,7 @@
 """
     file: marcelinoClient.py
-    Description: Cliente para o servidor marcelinoSrv, permitindo autenticação, 
-    transferência de arquivos e monitoramento remoto via SMB e SSH.
+    Description: Client for the marcelinoSrv server, providing authentication,
+    file transfer, and remote monitoring over SMB and SSH.
 
     date: 2026-06-15
 
@@ -62,7 +62,7 @@ from PIL import Image, ImageDraw
 
 SMB_PORT = 445
 STATUS_FILENAME = ".marcelinoSrv.json"
-MONITOR_SHARE = "Monitor"  # share oculto (browseable = no), acessado pelo nome
+MONITOR_SHARE = "Monitor"  # Hidden share (browseable = no), accessed by name
 MUTEX_NAME = "Local\\MarcelinoClientSingleInstance"
 THEME_PALETTE = {
     "background": ("#f2f5f7", "#171d22"),
@@ -81,12 +81,12 @@ THEME_PALETTE = {
 
 def show_info_dialog(parent, title, message):
     '''
-    Exibe um diálogo de informação com um botão "OK".
+    Display an information dialog with an "OK" button.
 
-    Parâmetros:
-    parent (tk.Widget): O widget pai para o diálogo.
-    title (str): O título do diálogo.
-    message (str): A mensagem a ser exibida no diálogo.
+    Parameters:
+    parent (tk.Widget): The parent widget for the dialog.
+    title (str): The dialog title.
+    message (str): The message to display in the dialog.
     '''
     dialog = ctk.CTkToplevel(parent)
     dialog.title(title)
@@ -106,15 +106,15 @@ def show_info_dialog(parent, title, message):
 
 def ask_text_dialog(parent, title, message):
     '''
-    Exibe um diálogo solicitando ao usuário que insira um texto.
+    Display a dialog asking the user to enter text.
 
-    Parâmetros:
-    parent (tk.Widget): O widget pai para o diálogo.
-    title (str): O título do diálogo.
-    message (str): A mensagem a ser exibida no diálogo.
+    Parameters:
+    parent (tk.Widget): The parent widget for the dialog.
+    title (str): The dialog title.
+    message (str): The message to display in the dialog.
 
-    Retorna:
-    str | None: O texto inserido pelo usuário, ou None se o diálogo for cancelado.
+    Returns:
+    str | None: The text entered by the user, or None if the dialog is canceled.
     '''
     dialog = ctk.CTkToplevel(parent)
     dialog.title(title)
@@ -148,12 +148,12 @@ def ask_text_dialog(parent, title, message):
 
 
 def hide_monitor_share(shares):
-    """Remove o compartilhamento de monitor da lista de compartilhamentos."""
+    """Remove the monitor share from the share list."""
     return [share for share in shares if share.casefold() != MONITOR_SHARE.casefold()]
 
 
 def acquire_single_instance():
-    """Retorna um handle para o mutex de instância única, ou None se já houver outra instância."""
+    """Return a single-instance mutex handle, or None if another instance is running."""
     if os.name == "nt":
         import ctypes
 
@@ -163,7 +163,7 @@ def acquire_single_instance():
         if ctypes.get_last_error() == 183:  # ERROR_ALREADY_EXISTS
             return None
         return handle
-    """Se não for Windows, utiliza um arquivo de lock para garantir instância única."""
+    """On non-Windows platforms, use a lock file to ensure a single instance."""
     import fcntl
 
     lock_file = open(Path(tempfile.gettempdir()) / f"marcelinoClient.{os.getuid()}.lock", "w")
@@ -176,7 +176,7 @@ def acquire_single_instance():
 
 
 def local_ip():
-    """Retorna o endereço IP local da máquina."""
+    """Return the machine's local IP address."""
     s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     try:
         s.connect(("10.255.255.255", 1))
@@ -188,8 +188,8 @@ def local_ip():
 
 
 def scan_network(callback):
-    """Varre a sub-rede /24 procurando hosts com a porta SMB aberta.
-    O callback é chamado com o endereço IP e o nome do host para cada host encontrado.
+    """Scan the /24 subnet for hosts with an open SMB port.
+    Call the callback with each discovered host's IP address and hostname.
     """
     base = local_ip().rsplit(".", 1)[0]
 
@@ -211,7 +211,7 @@ def scan_network(callback):
 
 
 class Remote:
-    """Representa um host remoto acessível via SMB."""
+    """Represent a remote host accessible over SMB."""
     def __init__(self, ip, name, user, password, domain=""):
         self.host = ip
         self.name = name
@@ -220,7 +220,7 @@ class Remote:
         )
 
     def list_shares(self, user, password, domain=""):
-        """Lista os compartilhamentos SMB disponíveis no host remoto."""
+        """List the SMB shares available on the remote host."""
         if os.name == "nt":
             return self._list_shares_windows(user, password, domain)
         if os.name == "posix":
@@ -228,7 +228,7 @@ class Remote:
         raise OSError(f"Enumeração SMB não suportada nesta plataforma: {os.name}")
 
     def _list_shares_linux(self, user, password, domain=""):
-        """Lista os compartilhamentos SMB disponíveis no host remoto usando smbclient no Linux."""
+        """List the SMB shares on the remote host using smbclient on Linux."""
         import tempfile
 
         smbclient_path = shutil.which("smbclient")
@@ -269,7 +269,7 @@ class Remote:
                 os.unlink(auth_path)
 
     def _list_shares_windows(self, user, password, domain=""):
-        """Lista os compartilhamentos SMB disponíveis no host remoto usando smbclient no Windows."""
+        """List the SMB shares available on the remote host using smbclient on Windows."""
         import ctypes
         from ctypes import wintypes
 
@@ -911,7 +911,7 @@ class App(ctk.CTk):
         self._save_settings()
 
     def add_tab(self, title, icon, build_page):
-        """Adiciona uma aba; build_page recebe o frame onde deve montar a tela."""
+        """Add a tab; build_page receives the frame in which to build the page."""
         page = ctk.CTkFrame(self.tab_container, fg_color="transparent")
         button = ctk.CTkButton(
             self.tab_bar,
@@ -1347,7 +1347,7 @@ class App(ctk.CTk):
                     cell.underscore, cell.reverse,
                 )
                 if cell.data == "":
-                    continue  # segunda célula de caractere largo
+                    continue  # Second cell of a wide character
                 rendered_row.append((cell.data, style))
             signature = tuple(rendered_row)
             if self.ssh_rendered_rows[row_index] == signature:
@@ -1592,14 +1592,13 @@ class App(ctk.CTk):
         for index, (label, key) in enumerate(system_fields):
             row, pair = divmod(index, 2)
             column = pair * 2
-            # normaliza o espaçamento e largura das labels de acordo com a coluna {
+            # Normalize label spacing and width based on the column.
             if column == 0:
                 padx = (4, 8)
                 width = 170
             else:
                 padx = (75, 8)
                 width = 120
-            # }
             ctk.CTkLabel(identity_grid, text=label, anchor="w", width=width).grid(
                 row=row, column=column, sticky="nw", padx=padx, pady=4,
             )
@@ -1883,7 +1882,7 @@ class App(ctk.CTk):
                 f"O explorador de arquivos não conseguiu abrir as pastas de {host}.\n{error}",
             )
 
-    # ---- util
+    # ---- utilities
     def say(self, msg):
         self.q.put(("log", msg))
 
@@ -1967,7 +1966,7 @@ class App(ctk.CTk):
         self.session_display.set(f"{self.authenticated_user} @ {remote.host}")
         self.select_tab("Sistema")
 
-    # ---- descoberta / conexão
+    # ---- discovery / connection
     def scan(self):
         self.say("Procurando servidores SMB na rede...")
 
@@ -2108,7 +2107,7 @@ class App(ctk.CTk):
         textbox.configure(state="disabled")
 
     def _unchanged(self, key, data):
-        # Evita reconstruir/relayout de widgets quando os dados são idênticos aos da última renderização.
+        # Avoid rebuilding or relaying out widgets when the data matches the last render.
         cache = self.__dict__.setdefault("_render_cache", {})
         signature = json.dumps(data, sort_keys=True, default=str)
         if cache.get(key) == signature:
@@ -2736,7 +2735,7 @@ class App(ctk.CTk):
             return f"{hours}h {minutes}m"
         return f"{minutes}m"
 
-    # ---- navegação remota
+    # ---- remote navigation
     def refresh(self):
         remote = self.remote
         share = self.share
@@ -3286,7 +3285,7 @@ class App(ctk.CTk):
         finally:
             self.transfer_in_progress = False
 
-    # ---- origem
+    # ---- sources
     def _render_sources(self):
         for row in self.source_row_widgets:
             row.destroy()

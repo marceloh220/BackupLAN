@@ -1,19 +1,19 @@
 #!/usr/bin/env python3
 """
     file: nas-speedtest.py
-    Description: Mede a velocidade da internet, registra em log e gera gráficos PNG.
-    Uso:
-    nas-speedtest test                    executa um teste novo e grava no log
-    nas-speedtest log [-n 10]             mostra os n últimos testes
-        nas-speedtest --log ARQUIVO log -n 10 usa outro arquivo e mostra os 10 últimos testes
-    nas-speedtest graph [-n 24]           gráfico dos n últimos testes
-    nas-speedtest graph --hours 24        gráfico das últimas 24 horas
+    Description: Measure internet speed, log results, and generate PNG charts.
+    Usage:
+    nas-speedtest test                    run a new test and save it to the log
+    nas-speedtest log [-n 10]             show the last n tests
+        nas-speedtest --log FILE log -n 10 use another file and show the last 10 tests
+    nas-speedtest graph [-n 24]           chart the last n tests
+    nas-speedtest graph --hours 24        chart the last 24 hours
 
-    --log define o caminho do arquivo JSON; -n define quantos testes listar.
+    --log sets the JSON file path; -n sets how many tests to list.
 
-    Observation: Designado para rodar no lado do servidor linux
-            instalar funcionalidades com: sudo nas-setup.sh --speedtest
-            ou para instalação completa de uma instalação limpa do Debian: sudo nas-setup.sh --all
+    Intended to run on the Linux server.
+    Install this feature with: sudo nas-setup.sh --speedtest
+    Or install everything on a clean Debian system with: sudo nas-setup.sh --all
 
     date: 2026-06-15
 
@@ -51,7 +51,7 @@ from pathlib import Path
 
 DEFAULT_LOG = "/var/log/nas-speedtest.jsonl"
 DEFAULT_OUT = "/srv/marcelo/internet_test"
-# O speedtest-cli devolve 1800000 ms quando as sondas de latência do servidor falham.
+# speedtest-cli returns 1800000 ms when the server's latency probes fail.
 PING_INVALID_MS = 10000
 
 
@@ -96,7 +96,7 @@ def run_server(server_id, timeout):
 
 
 def nearest_servers(count, timeout):
-    """IDs dos servidores mais próximos, na ordem da lista do speedtest-cli."""
+    """Return IDs of the nearest servers in speedtest-cli list order."""
     proc = subprocess.run(["speedtest-cli", "--list"], capture_output=True, text=True,
                           timeout=timeout, check=True)
     ids = re.findall(r"^\s*(\d+)\)", proc.stdout, re.MULTILINE)
@@ -104,12 +104,12 @@ def nearest_servers(count, timeout):
 
 
 def rank(r):
-    # Prefere servidores com latência válida; entre eles, o maior download.
+    # Prefer servers with valid latency; among them, choose the highest download speed.
     return (r["ping_ms"] is not None, r["download_mbps"])
 
 
 def best_of(candidates, timeout):
-    """Testa cada servidor e devolve (melhor resultado ou None, último erro)."""
+    """Test each server and return (best result or None, last error)."""
     best, last_error = None, ""
     for server_id in candidates:
         try:
@@ -124,7 +124,7 @@ def best_of(candidates, timeout):
 
 def cmd_test(args):
     entry = {"timestamp": now().isoformat(timespec="seconds")}
-    # Servidores fracos distorcem o resultado: testa vários e mantém o melhor.
+    # Weak servers skew results, so test several and keep the best one.
     best, last_error = (None, "")
     if args.server:
         best, last_error = best_of(args.server, args.timeout)
@@ -178,7 +178,7 @@ def match_owner(path, reference):
 
 
 def make_dirs(base, year, month):
-    """Cria base/ano/mes herdando o dono do diretório base."""
+    """Create base/year/month directories, inheriting the base directory's owner."""
     base = Path(base)
     base.mkdir(parents=True, exist_ok=True)
     target = base

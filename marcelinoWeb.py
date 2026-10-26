@@ -1,17 +1,17 @@
 #!/usr/bin/env python3
 """
     file: marcelinoWeb.py
-    Description: Dashboard web (somente biblioteca padrão) com login de usuários
-    que exibe as métricas publicadas pelo marcelinoServer.
+    Description: Web dashboard (standard library only) with user login that
+    displays metrics published by marcelinoServer.
 
     Uso:
         marcelinoWeb.py serve [--host 0.0.0.0] [--port 8080] [--status ARQUIVO]
-        marcelinoWeb.py useradd NOME      cadastra usuário (senha pedida no terminal)
-        marcelinoWeb.py passwd NOME       altera a senha
-        marcelinoWeb.py userdel NOME      remove o usuário
-        marcelinoWeb.py users             lista usuários
+        marcelinoWeb.py useradd NAME      add a user (password prompted in the terminal)
+        marcelinoWeb.py passwd NAME       change a password
+        marcelinoWeb.py userdel NAME      remove a user
+        marcelinoWeb.py users             list users
 
-    Observation: instalar com: sudo nas-setup.sh --web
+    Install with: sudo nas-setup.sh --web
 
     MIT License - Copyright (c) 2026 Marcelo H Moraes
 """
@@ -48,11 +48,11 @@ LOCKOUT_SECONDS = 300
 _sessions = {}
 _failures = {}
 _lock = threading.Lock()
-# Hash fictício para igualar o tempo de resposta quando o usuário não existe.
+# Dummy hash to equalize response time when the user does not exist.
 _DUMMY_HASH = None
 
 
-# ---------------------------------------------------------------- usuários
+# ---------------------------------------------------------------- users
 
 def _hash_password(password, salt=None, iterations=PBKDF2_ITERATIONS):
     salt = salt or secrets.token_bytes(16)
@@ -130,7 +130,7 @@ def cli_users(args):
     print("OK")
 
 
-# ---------------------------------------------------------------- sessões
+# ---------------------------------------------------------------- sessions
 
 def _new_session(username):
     token = secrets.token_urlsafe(32)
@@ -169,7 +169,7 @@ def _register_failure(ip):
         _failures[ip] = (count + 1, time.time() + LOCKOUT_SECONDS)
 
 
-# ---------------------------------------------------------------- páginas
+# ---------------------------------------------------------------- pages
 
 LOGIN_HTML = """<!doctype html>
 <html lang="pt-BR"><head><meta charset="utf-8">
@@ -357,7 +357,7 @@ setInterval(refresh, 5000);
 """
 
 
-# ---------------------------------------------------------------- servidor
+# ---------------------------------------------------------------- server
 
 class Handler(BaseHTTPRequestHandler):
     server_version = "marcelinoWeb"

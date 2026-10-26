@@ -1,68 +1,72 @@
-# Marcelino NAS e Cliente
+# Marcelino NAS and Client
 
-Este projeto reúne o script de configuração de um NAS Debian, um agente que publica estatísticas do servidor em um compartilhamento Samba e o aplicativo Windows `marcelino Client`.
+[English](README.md) | [Português (Brasil)](README.pt-BR.md)
 
-## Componentes
+This project includes a Debian NAS setup script, an agent that publishes server statistics to a Samba share, and the Windows `marcelino Client` application.
+An alternative cross-platform .NET version of Marcelino Client is available for Windows on [MarcelinoClientDotNet](https://github.com/marceloh220/MarcelinoClientDotNet)
 
-| Componente | Arquivo | Função |
+## Components
+
+| Component | File | Purpose |
 |---|---|---|
-| Configuração do NAS | `nas-setup.sh` | Prepara IP estático, armazenamento, Samba, descoberta de rede, NTP, DNS/DHCP com bloqueio de anúncios/rastreadores e firewall. |
-| Teste de velocidade | `nas-speedtest.py` | Mede download, upload e ping; registra resultados em JSONL, lista testes e gera gráficos. |
-| Agente de estatísticas | `marcelinoServer.py` | Publica métricas do servidor, estado dos arrays RAID e regras de compartilhamento Samba em JSON. |
-| Serviço systemd | `marcelinoServer.service` | Executa o agente após a inicialização do sistema. |
-| Instalador do agente | `install_marcelinoServer.sh` | Atalho compatível para `nas-setup.sh --marcelino-server`. |
-| Dashboard web | `marcelinoWeb.py`, `marcelinoWeb.service` | Servidor web com login que exibe as métricas publicadas pelo agente, incluindo estado e sincronização do RAID, acessível pela rede local. |
-| Cliente Windows | `marcelinoClient.py` | Interface para métricas do servidor, discos e RAID, compartilhamentos, backup/restauração e terminal SSH. |
-| Prévia do cliente | `preview_marcelinoClient.py` | Abre uma aba com dados genéricos locais, sem conexão com servidor. |
-| Instalador do cliente | `install_marcelinoClient.ps1` | Instala dependências, gera o executável e cria atalhos. |
+| NAS setup | `nas-setup.sh` | Configures a static IP, storage, Samba, network discovery, NTP, DNS/DHCP with ad/tracker blocking, and a firewall. |
+| Speed test | `nas-speedtest.py` | Measures download, upload, and ping; logs results as JSONL, lists tests, and generates charts. |
+| Statistics agent | `marcelinoServer.py` | Publishes server metrics, RAID array status, and Samba share rules as JSON. |
+| systemd service | `marcelinoServer.service` | Runs the agent after system startup. |
+| Agent installer | `install_marcelinoServer.sh` | Compatibility wrapper for `nas-setup.sh --marcelino-server`. |
+| Web dashboard | `marcelinoWeb.py`, `marcelinoWeb.service` | Login-protected web server displaying metrics published by the agent, including RAID status and synchronization, available on the local network. |
+| Windows client | `marcelinoClient.py` | Interface for server metrics, disks and RAID, shares, backup/restore, and an SSH terminal. |
+| Client preview | `preview_marcelinoClient.py` | Opens a tab with generic local data and no server connection. |
+| Client installer | `install_marcelinoClient.ps1` | Installs dependencies, builds the executable, and creates shortcuts. |
 
-## Configurar o NAS
+## Configure the NAS
 
-O `nas-setup.sh` destina-se a Debian e deve ser executado como root. Consulte as opções antes de escolher as etapas:
+`nas-setup.sh` is intended for Debian and must be run as root. Review the available options before selecting the setup steps:
 
 ```bash
 sudo bash nas-setup.sh --help
 ```
 
-Cada opção de serviço instala suas dependências, configura o serviço e abre somente suas portas no UFW. As opções podem ser executadas separadamente ou combinadas:
+Each service option installs its dependencies, configures the service, and opens only its required UFW ports. Options can be run separately or combined:
 
-| Opção | O que configura |
+| Option | What it configures |
 |---|---|
-| `--network` | Configura o IP estático `NAS_IP`/`NAS_PREFIX` na interface (NetworkManager ou `/etc/network/interfaces`, com backup em `interfaces.orig`). A conexão SSH atual pode cair; reconecte no novo IP. |
-| `--raid` | Cria o RAID com `mdadm` e atualiza a configuração de boot. |
-| `--storage` | Formata e monta o volume; pode configurar criptografia LUKS e desbloqueio automático. |
-| `--user` | Cria os cadastros ausentes do usuário principal (`USER_NAME`, senha `USER_PASSWORD`) no sistema e no Samba; preserva o home e as senhas de contas existentes e garante associação ao grupo Samba. Também é executado pelas etapas Samba, dashboard e teste de velocidade. |
-| `--samba` / `--uninstall-samba` | Instala/configura Samba e libera suas portas; a desinstalação para o serviço e remove o pacote, mantendo shares e arquivos. |
-| `--discovery` / `--uninstall-discovery` | Configura/remove Avahi e WS-Discovery, com suas portas de firewall. |
-| `--ntp` / `--uninstall-ntp` | Configura/remove chrony como servidor de horário da LAN, com a porta NTP. |
-| `--dns` / `--uninstall-dns` | Configura/remove dnsmasq para DNS e DHCP da LAN (veja abaixo), com restauração do backup de `resolv.conf`. |
-| `--speedtest` / `--uninstall-speedtest` | Instala/remove o comando e os timers de teste/gráfico; logs e gráficos existentes são preservados. |
-| `--marcelino-server` / `--uninstall-marcelino-server` | Instala/remove o agente de métricas, sem abrir portas; configuração e JSON existentes são preservados na remoção. |
-| `--web` / `--uninstall-web` | Instala/remove o dashboard e sua regra de firewall; usuários, certificados e configuração persistente são preservados. |
-| `--anytype` / `--uninstall-anytype` | Configura/remove o serviço Anytype em Docker e seu timer de backup diário; dados e backups são preservados e Docker só é desabilitado/removido se não houver outros contêineres ativos. |
-| `--ssh` / `--uninstall-ssh` | Instala/configura ou remove o servidor SSH, configurações gerenciadas e regra da porta `SSH_PORT`. A desinstalação encerra o acesso SSH remoto. |
-| `--dlna` / `--uninstall-dlna` | Instala/remove MiniDLNA e abre/fecha SSDP e a porta `DLNA_PORT`; mídia, banco/cache e logs são preservados. |
-| `--all` | Configura rede, RAID, armazenamento, usuário e todos os serviços, incluindo SSH e DLNA. Não executa desinstalações. |
+| `--network` | Configures the static IP `NAS_IP`/`NAS_PREFIX` on the interface (NetworkManager or `/etc/network/interfaces`, with a backup at `interfaces.orig`). The current SSH connection may drop; reconnect using the new IP. |
+| `--raid` | Creates the RAID with `mdadm` and updates the boot configuration. |
+| `--storage` | Formats and mounts the volume; can configure LUKS encryption and automatic unlocking. |
+| `--user` | Creates missing accounts for the primary user (`USER_NAME`, password `USER_PASSWORD`) on the system and in Samba; preserves existing home directories and passwords, and ensures membership in the Samba group. This step is also run by the Samba, dashboard, and speed-test steps. |
+| `--samba` / `--uninstall-samba` | Installs/configures Samba and opens its ports; uninstalling stops the service and removes the package while preserving shares and files. |
+| `--discovery` / `--uninstall-discovery` | Configures/removes Avahi and WS-Discovery, including their firewall ports. |
+| `--ntp` / `--uninstall-ntp` | Configures/removes chrony as the LAN time server, including the NTP port. |
+| `--dns` / `--uninstall-dns` | Configures/removes dnsmasq for LAN DNS and DHCP (see below), restoring the `resolv.conf` backup when removed. |
+| `--speedtest` / `--uninstall-speedtest` | Installs/removes the command and speed-test/chart timers; existing logs and charts are preserved. |
+| `--marcelino-server` / `--uninstall-marcelino-server` | Installs/removes the metrics agent without opening ports; configuration and existing JSON are preserved on removal. |
+| `--web` / `--uninstall-web` | Installs/removes the dashboard and its firewall rule; users, certificates, and persistent configuration are preserved. |
+| `--anytype` / `--uninstall-anytype` | Configures/removes the Anytype service in Docker and its daily backup timer; data and backups are preserved, and Docker is disabled/removed only if there are no other active containers. |
+| `--syncthing` / `--uninstall-syncthing` | Installs/removes Syncthing as the primary user's service, with LAN synchronization ports; configuration, identity, and synced folders are preserved. |
+| `--ssh` / `--uninstall-ssh` | Installs/configures or removes the SSH server, managed settings, and the `SSH_PORT` rule. Uninstalling ends remote SSH access. |
+| `--dlna` / `--uninstall-dlna` | Installs/removes MiniDLNA and opens/closes SSDP and the `DLNA_PORT`; media, database/cache, and logs are preserved. |
+| `--all` | Configures networking, RAID, storage, the user, and all services, including SSH, Syncthing, and DLNA. It does not uninstall anything. |
 
-As opções de desinstalação aceitam também a grafia `--unistall-*` por compatibilidade. Não há opção para desinstalar RAID ou armazenamento: nenhuma opção de remoção apaga partições, altera LUKS, desmonta volumes ou desativa arrays RAID. O firewall não é redefinido; somente as regras da etapa selecionada são alteradas.
+Uninstall options also accept the misspelled `--unistall-*` form for compatibility. There is no RAID or storage uninstall option: no removal option deletes partitions, changes LUKS, unmounts volumes, or disables RAID arrays. The firewall is not reset; only rules for the selected step are changed.
 
-As opções são editadas na seção **CONFIGURAÇÃO** no começo do script. Os valores fornecidos incluem:
+Options are edited in the **CONFIGURATION** section at the top of the script. The supplied values include:
 
-- RAID espelhado nível 1 com `/dev/sdb` e `/dev/sdc`, criado como `/dev/md0`.
-- Sistema de arquivos configurável em `RAID_FILESYSTEM`: `ext4` (padrão), `xfs` ou `btrfs`.
-- Volume em `/srv/nas`; LUKS habilitado sobre `/dev/md0`, com mapeamento `nas_crypt`, keyfile `/etc/nas.key` e desbloqueio automático.
-- Aplicativos em `APP_STORAGE` (padrão `/srv/app`): Monitor, Anytype e banco/cache DLNA. Esse caminho não fica automaticamente no RAID nem dentro do LUKS; configure uma montagem própria ou use um caminho dentro do volume se precisar dessa proteção.
-- Shares `Publico`, `Privado`, `Backup`, `Midia`, `Monitor` e o share do usuário principal (`USER_NAME` com a primeira letra maiúscula).
-- `Publico` permite convidados; `Backup` e `Midia` usam o grupo `nasgroup`; `Privado` e o share do usuário são restritos a `USER_NAME`.
-- Usuário principal: `USER_NAME` e `USER_PASSWORD` (troque o valor `sua_senha_aqui`; mínimo 8 caracteres para novos cadastros). Se `USER_PASSWORD=""`, a senha será solicitada interativamente no terminal, sem exibir os caracteres digitados, quando necessária para cadastrar contas ou configurar o login web. Em execuções não interativas, preencha a variável previamente. Contas Linux e Samba existentes mantêm suas senhas; se ambas já existirem, a etapa de usuário não exige uma nova senha. O dashboard usa `USER_PASSWORD` separadamente para o login web. Se preenchida no script, a senha fica em texto puro; restrinja o acesso ao arquivo.
-- Grupo de trabalho `WORKGROUP`, domínio `lan` (`LOCAL_DOMAIN`), SSH na porta 22 e chrony habilitado.
-- Rede: `IP_INET`, `IP_GATEWAY`, `IP_RANGE_START`, `IP_RANGE_END`, `DNS_UPSTREAM` e `LOCAL_DOMAIN` ficam no topo do script e alimentam `NAS_IP`, `NET_GATEWAY`, a faixa DHCP e o domínio. Ajuste-os para a sua rede (o NAS, o gateway e a faixa DHCP devem estar na mesma sub-rede).
+- RAID 1 mirror using `/dev/sdb` and `/dev/sdc`, created as `/dev/md0`.
+- Configurable filesystem in `RAID_FILESYSTEM`: `ext4` (default), `xfs`, or `btrfs`.
+- Volume at `/srv/nas`; LUKS enabled on `/dev/md0`, with the `nas_crypt` mapping, keyfile `/etc/nas.key`, and automatic unlocking.
+- Applications in `APP_STORAGE` (default `/srv/app`): Monitor, Anytype, Syncthing configuration, and DLNA database/cache. This path is not automatically on the RAID or inside LUKS; configure a separate mount or use a path inside the volume if you need that protection.
+- Shares `Publico`, `Privado`, `Backup`, `Midia`, `Monitor`, and the primary user's share (`USER_NAME` with its first letter capitalized).
+- `Publico` allows guests; `Backup` and `Midia` use the `nasgroup` group; `Privado` and the user's share are restricted to `USER_NAME`.
+- Primary user: `USER_NAME` and `USER_PASSWORD` (replace `sua_senha_aqui`; at least 8 characters for new accounts). If `USER_PASSWORD=""`, the password is prompted for interactively in the terminal, without echoing typed characters, when needed to create accounts or configure web login. For non-interactive runs, set the variable beforehand. Existing Linux and Samba accounts keep their passwords; if both accounts already exist, the user step does not require a new password. The dashboard uses `USER_PASSWORD` separately for web login. If entered in the script, the password is stored in plain text; restrict access to the file.
+- Workgroup `WORKGROUP`, domain `lan` (`LOCAL_DOMAIN`), SSH on port 22, and chrony enabled.
+- Network: `IP_INET`, `IP_GATEWAY`, `IP_RANGE_START`, `IP_RANGE_END`, `DNS_UPSTREAM`, and `LOCAL_DOMAIN` are set near the top of the script and supply `NAS_IP`, `NET_GATEWAY`, the DHCP range, and the domain. Adjust them for your network (the NAS, gateway, and DHCP range must be on the same subnet).
 
-### Anytype: sync host local
+### Anytype: local sync host
 
-A etapa `--anytype` usa o projeto comunitário [any-sync-bundle](https://github.com/grishy/any-sync-bundle), não a stack oficial completa do Anytype. O contêiner reúne os serviços de sincronização e armazena os dados no NAS. A imagem all-in-one exige uma CPU compatível com seu MongoDB (AVX em x86_64).
+The `--anytype` step uses the community project [any-sync-bundle](https://github.com/grishy/any-sync-bundle), not the complete official Anytype stack. The container bundles the synchronization services and stores data on the NAS. The all-in-one image requires a CPU compatible with its MongoDB (AVX on x86_64).
 
-Revise `ANYTYPE_ENABLE` (padrão `yes`), `ANYTYPE_IMAGE` (versão fixada), `ANYTYPE_DATA` (padrão `/srv/app/anytype`), `ANYTYPE_BACKUP` (padrão `/srv/nas/backup/anytype`) e `ANYTYPE_HOST` (padrão `NAS_IP`). O destino do backup não pode ficar dentro de `ANYTYPE_DATA`. Monte o armazenamento antes de configurar o serviço:
+Review `ANYTYPE_ENABLE` (default `yes`), `ANYTYPE_IMAGE` (pinned version), `ANYTYPE_DATA` (default `/srv/app/anytype`), `ANYTYPE_BACKUP` (default `/srv/nas/backup/anytype`), and `ANYTYPE_HOST` (default `NAS_IP`). The backup destination must not be inside `ANYTYPE_DATA`. Mount the storage before configuring the service:
 
 ```bash
 sudo bash nas-setup.sh --anytype
@@ -70,142 +74,162 @@ sudo systemctl status nas-anytype.service
 sudo journalctl -u nas-anytype.service -n 50 --no-pager
 ```
 
-O serviço systemd inicia o contêiner com a rede do host, sem publicar portas via NAT do Docker; assim o UFW controla o acesso. Somente `LAN_CIDR` recebe acesso a **33010/tcp** (sync) e **33020/udp** (QUIC). Não é necessário abrir portas no roteador para uso na LAN.
+The systemd service starts the container using the host network, without publishing ports through Docker NAT; UFW therefore controls access. Only `LAN_CIDR` is allowed to access **33010/tcp** (sync) and **33020/udp** (QUIC). You do not need to open router ports for LAN use.
 
-Após a primeira inicialização, transfira com segurança `/srv/app/anytype/client-config.yml` para cada dispositivo e importe-o em **Network > Self-hosted** no Anytype. Se alterar `ANYTYPE_DATA`, use o caminho correspondente. O diretório é restrito ao root; não compartilhe `bundle-config.yml`, pois contém chaves privadas. Recomenda-se usar uma identidade dedicada e exportar/importar os dados ao migrar de outra rede.
+After the first startup, securely transfer `/srv/app/anytype/client-config.yml` to each device and import it in **Network > Self-hosted** in Anytype. If you change `ANYTYPE_DATA`, use the corresponding path. The directory is restricted to root; do not share `bundle-config.yml`, which contains private keys. Using a dedicated identity and exporting/importing data when migrating from another network is recommended.
 
-`ANYTYPE_HOST` define o endereço anunciado apenas no primeiro início. Para mudar esse endereço posteriormente, edite `externalAddr` em `bundle-config.yml`, reinicie `nas-anytype.service` e importe novamente o `client-config.yml` gerado nos dispositivos.
+`ANYTYPE_HOST` sets the advertised address only on first startup. To change it later, edit `externalAddr` in `bundle-config.yml`, restart `nas-anytype.service`, and re-import the generated `client-config.yml` on the devices.
 
-O timer `nas-anytype-backup.timer` faz backup diário à meia-noite (horário local) de todo `ANYTYPE_DATA`, incluindo `bundle-config.yml`, em arquivos `anytype-*.tar.gz` dentro de `ANYTYPE_BACKUP`, restritos ao root. O serviço é parado durante a compactação e reiniciado ao final, inclusive em caso de falha; se já estiver parado, permanece assim. Backups interrompidos não são publicados como arquivos completos. Com `Persistent=true`, uma execução perdida é disparada quando o timer voltar a ficar ativo. Os arquivos são acumulados sem exclusão automática; monitore o espaço disponível.
+The `nas-anytype-backup.timer` creates a daily backup at midnight (local time) of all `ANYTYPE_DATA`, including `bundle-config.yml`, in `anytype-*.tar.gz` files inside `ANYTYPE_BACKUP`, restricted to root. The service is stopped during compression and restarted afterward, including when compression fails; if it was already stopped, it remains stopped. Interrupted backups are not published as complete files. With `Persistent=true`, a missed run starts when the timer becomes active again. Files accumulate without automatic deletion; monitor available disk space.
 
-Para executar um backup manualmente, use `sudo systemctl start nas-anytype-backup.service`. Consulte o agendamento com `systemctl list-timers nas-anytype-backup.timer` e os logs com `sudo journalctl -u nas-anytype-backup.service`. O uninstall remove o timer, o serviço de backup e o script auxiliar, preservando os dados e os backups existentes.
+To run a manual backup, use `sudo systemctl start nas-anytype-backup.service`. Check the schedule with `systemctl list-timers nas-anytype-backup.timer` and the logs with `sudo journalctl -u nas-anytype-backup.service`. Uninstalling removes the timer, backup service, and helper script while preserving existing data and backups.
 
-Não apague `ANYTYPE_DATA` ao atualizar a imagem. Definir `ANYTYPE_ENABLE=no` apenas pula a configuração futura; para parar uma instalação existente e seu agendamento, execute também `sudo systemctl disable --now nas-anytype-backup.timer nas-anytype.service`.
+Do not delete `ANYTYPE_DATA` when updating the image. Setting `ANYTYPE_ENABLE=no` only skips future configuration; to stop an existing installation and its schedule, also run `sudo systemctl disable --now nas-anytype-backup.timer nas-anytype.service`.
+
+### Syncthing
+
+`--syncthing` installs the package from the Debian repositories and configures `nas-syncthing.service` to start at boot as `USER_NAME`, without running as root. This step also runs `setup_user`, creating any missing Linux/Samba accounts. Adjust `SYNCTHING_ENABLE` (default `yes`) and `SYNCTHING_HOME` (default `/srv/app/syncthing`, for configuration, identity, and indexes). Mount the storage before installation.
+
+```bash
+sudo bash nas-setup.sh --syncthing
+sudo systemctl status nas-syncthing.service
+sudo journalctl -u nas-syncthing.service -n 50 --no-pager
+```
+
+The web interface is restricted to `127.0.0.1:8384`, with no firewall rule for direct LAN access. On your computer, open a tunnel (adjust the user, IP, and SSH port for your setup):
+
+```bash
+ssh -p 22 -L 8384:127.0.0.1:8384 meneceu@192.168.0.1
+```
+
+With the tunnel open, visit `http://127.0.0.1:8384`, set the interface username/password, and add devices and folders. The default folder is `Sync` in the user's home directory; other folders must allow access to `USER_NAME`. Avoid sharing `SYNCTHING_HOME`, which contains keys and configuration. UFW allows only `LAN_CIDR` to access the default ports **22000/tcp**, **22000/udp** (QUIC), and **21027/udp** (local discovery); if you change the ports in the interface, update the firewall as well. Global discovery, relays, and automatic port mapping follow Syncthing defaults; disable them in the interface for LAN-only use. Synchronization can propagate deletions and does not replace backups.
+
+To remove it, run `sudo bash nas-setup.sh --uninstall-syncthing`. The service, package, and rules are removed, but the account, configuration, identity, indexes, and synced files remain. Reinstall with the same `USER_NAME` and `SYNCTHING_HOME` to reuse the identity. `SYNCTHING_ENABLE=no` only skips future installations and does not stop an existing one.
 
 ### DLNA
 
-`--dlna` instala MiniDLNA e exige que o volume de armazenamento já esteja montado. Ajuste `DLNA_ENABLE`, `DLNA_PORT`, `DLNA_MEDIA_MUSIC`, `DLNA_MEDIA_VIDEO`, `DLNA_MEDIA_PICTURES`, `DLNA_CACHE` e `DLNA_LOG` no início de `nas-setup.sh`. A regra do UFW é criada junto com o serviço; para remover MiniDLNA e fechar as portas, execute `sudo bash nas-setup.sh --uninstall-dlna` (ou `--unistall-dlna`). A remoção mantém as mídias, o banco/cache e os logs.
+`--dlna` installs MiniDLNA and requires the storage volume to be mounted first. Adjust `DLNA_ENABLE`, `DLNA_PORT`, `DLNA_MEDIA_MUSIC`, `DLNA_MEDIA_VIDEO`, `DLNA_MEDIA_PICTURES`, `DLNA_CACHE`, and `DLNA_LOG` at the top of `nas-setup.sh`. The UFW rule is created with the service; to remove MiniDLNA and close the ports, run `sudo bash nas-setup.sh --uninstall-dlna` (or `--unistall-dlna`). Removal preserves media, the database/cache, and logs.
 
-### Teste de velocidade da internet
+### Internet speed test
 
-A etapa `--speedtest` (`SPEEDTEST_ENABLE`) instala `speedtest-cli` e `python3-matplotlib`, copia `nas-speedtest.py` para `/usr/local/bin/nas-speedtest` e ativa dois timers:
+The `--speedtest` step (`SPEEDTEST_ENABLE`) installs `speedtest-cli` and `python3-matplotlib`, copies `nas-speedtest.py` to `/usr/local/bin/nas-speedtest`, and enables two timers:
 
-- `nas-speedtest.timer`: um teste de hora em hora, gravado em `SPEEDTEST_LOG` (`/var/log/nas-speedtest.jsonl`).
-- `nas-speedtest-graph.timer`: todo dia às `SPEEDTEST_GRAPH_TIME` (23:55) gera o gráfico das últimas 24 horas em `SPEEDTEST_OUT/ANO/MES/` (padrão `/srv/marcelo/internet_test`), a pasta é escolhida pela data do gráfico.
+- `nas-speedtest.timer`: runs a test every hour and writes it to `SPEEDTEST_LOG` ( `/var/log/nas-speedtest.jsonl`).
+- `nas-speedtest-graph.timer`: generates a chart of the last 24 hours every day at `SPEEDTEST_GRAPH_TIME` (23:55) in `SPEEDTEST_OUT/YEAR/MONTH/` (default `/srv/marcelo/internet_test`); the folder is selected based on the chart date.
 
-Uso manual:
+Manual usage:
 
 ```bash
-sudo nas-speedtest test              # teste novo, registrado no log
-nas-speedtest log -n 10              # últimos 10 testes
-nas-speedtest --log /caminho/log.jsonl log -n 10  # usa outro arquivo de log
-sudo nas-speedtest graph -n 24       # gráfico dos últimos 24 testes
-sudo nas-speedtest graph --hours 24  # gráfico das últimas 24 horas
+sudo nas-speedtest test              # run a new test and log it
+nas-speedtest log -n 10              # last 10 tests
+nas-speedtest --log /path/log.jsonl log -n 10  # use another log file
+sudo nas-speedtest graph -n 24       # chart the last 24 tests
+sudo nas-speedtest graph --hours 24  # chart the last 24 hours
 ```
 
-No subcomando `log`, use `-n` para definir a quantidade de testes. A opção global `--log` indica o caminho do arquivo JSON; por isso, `nas-speedtest --log 10 log` procura um arquivo chamado `10` e pode informar que não há testes registrados.
+For the `log` subcommand, use `-n` to set the number of tests. The global `--log` option specifies the JSON file path; therefore, `nas-speedtest --log 10 log` looks for a file named `10` and may report that no tests are recorded.
 
-Os gráficos incluem grades major e minor, com estilos distintos para facilitar a leitura.
+Charts include major and minor grids with distinct styles for readability.
 
-#### Gerenciar timers
+#### Manage timers
 
-Consulte o estado dos timers e os próximos horários programados:
+Check the timer status and next scheduled runs:
 
 ```bash
 systemctl list-timers --all 'nas-speedtest*'
 sudo systemctl status nas-speedtest.timer nas-speedtest-graph.timer
 ```
 
-Para executar cada tarefa imediatamente, sem esperar pelo próximo horário:
+To run either task immediately, without waiting for its next scheduled time:
 
 ```bash
-sudo systemctl start nas-speedtest.service        # executa um teste e atualiza o log
-sudo systemctl start nas-speedtest-graph.service  # gera o gráfico das últimas 24 horas
+sudo systemctl start nas-speedtest.service        # run a test and update the log
+sudo systemctl start nas-speedtest-graph.service  # chart the last 24 hours
 ```
 
-Para pausar os agendamentos e impedir que voltem após reiniciar, ou para reativá-los:
+To pause the schedules and prevent them from starting again after a reboot, or to re-enable them:
 
 ```bash
 sudo systemctl disable --now nas-speedtest.timer nas-speedtest-graph.timer
 sudo systemctl enable --now nas-speedtest.timer nas-speedtest-graph.timer
 ```
 
-Consulte a saída das últimas execuções pelo journal do systemd:
+View the output from recent runs in the systemd journal:
 
 ```bash
 sudo journalctl -u nas-speedtest.service -n 50 --no-pager
 sudo journalctl -u nas-speedtest-graph.service -n 50 --no-pager
 ```
 
-Os PNG são nomeados `speedtest_AAAA-MM-DD_<periodo>.png` (por exemplo `speedtest_2026-10-15_24h.png`), com a data do último resultado incluído, e herdam o dono da pasta base.
+PNG files are named `speedtest_YYYY-MM-DD_<period>.png` (for example, `speedtest_2026-10-15_24h.png`), using the date of the last included result, and inherit the owner of the base folder.
 
-### IP estático, DNS e DHCP
+### Static IP, DNS, and DHCP
 
-- **IP estático (`--network`):** controlado por `NET_STATIC`, `NAS_IP`, `NAS_PREFIX`, `NET_IFACE` e `NET_GATEWAY`. Interface e gateway vazios são detectados pela rota padrão. Se `LAN_CIDR` estiver vazio, é derivado de `NAS_IP/NAS_PREFIX`.
-- **DNS (`--dns`, `DNS_ENABLE`):** dnsmasq com cache, resolvedores externos em `DNS_UPSTREAM` e domínio local `DNS_DOMAIN`. Clientes DHCP são registrados por nome (`pc1` e `pc1.lan`) e o próprio NAS responde pelo `NAS_IP`. Máquinas com IP fixo precisam de entrada no `/etc/hosts` do NAS ou de `dhcp-host=` em `/etc/dnsmasq.d/nas.conf`; o script mantém uma cópia filtrada em `/var/lib/nas-dns/hosts`, removendo entradas loopback (`127.x.x.x` e `::1`) antes de servi-las na LAN. Reexecute `sudo bash nas-setup.sh --dns` após alterar `/etc/hosts`. O `systemd-resolved` é desativado e o `/etc/resolv.conf` do NAS aponta para `127.0.0.1`. A configuração ativa `log-queries=extra` e `log-dhcp`; as listas de acessos liberados/bloqueados exibem os últimos eventos da última hora. O agente guarda os eventos classificados em `/var/log/marcelinoServer/dnsmasq-access.jsonl`, com rotação de 5 MB e três cópias, e o journal original pode ser consultado com `journalctl -u dnsmasq`.
-- **Bloqueio de anúncios, rastreadores e malware:** as listas em `DNS_BLOCKLISTS` (padrão: StevenBlack, HaGeZi Pro e HaGeZi TIF medium) são consolidadas em `/var/lib/nas-dns/blocklist.hosts` por `/usr/local/sbin/update-dns-blocklist`, executado na instalação e semanalmente pelo timer `nas-dns-blocklist.timer`. São aceitos os formatos hosts e dnsmasq (`local=/dominio/`).
-- **DHCP (`DHCP_ENABLE`):** faixa `DHCP_RANGE_START`–`DHCP_RANGE_END` com concessão `DHCP_LEASE`; entrega gateway, o NAS como DNS e, com NTP ativo, o NAS como servidor de horário. Desative o DHCP do roteador antes para evitar dois servidores na rede.
+- **Static IP (`--network`):** controlled by `NET_STATIC`, `NAS_IP`, `NAS_PREFIX`, `NET_IFACE`, and `NET_GATEWAY`. Empty interface and gateway values are detected from the default route. If `LAN_CIDR` is empty, it is derived from `NAS_IP/NAS_PREFIX`.
+- **DNS (`--dns`, `DNS_ENABLE`):** dnsmasq with caching, external resolvers in `DNS_UPSTREAM`, and local domain `DNS_DOMAIN`. DHCP clients are registered by name (`pc1` and `pc1.lan`), and the NAS itself resolves to `NAS_IP`. Hosts with static IPs need an entry in the NAS `/etc/hosts` or a `dhcp-host=` entry in `/etc/dnsmasq.d/nas.conf`; the script keeps a filtered copy at `/var/lib/nas-dns/hosts`, removing loopback entries (`127.x.x.x` and `::1`) before serving them on the LAN. Re-run `sudo bash nas-setup.sh --dns` after changing `/etc/hosts`. `systemd-resolved` is disabled and the NAS `/etc/resolv.conf` points to `127.0.0.1`. The configuration enables `log-queries=extra` and `log-dhcp`; allowed/blocked access lists show events from the last hour. The agent stores classified events in `/var/log/marcelinoServer/dnsmasq-access.jsonl`, with 5 MB rotation and three backups; the original journal can be viewed with `journalctl -u dnsmasq`.
+- **Ad, tracker, and malware blocking:** lists in `DNS_BLOCKLISTS` (default: StevenBlack, HaGeZi Pro, and HaGeZi TIF medium) are consolidated into `/var/lib/nas-dns/blocklist.hosts` by `/usr/local/sbin/update-dns-blocklist`, which runs during installation and weekly via `nas-dns-blocklist.timer`. Hosts and dnsmasq (`local=/domain/`) formats are supported.
+- **DHCP (`DHCP_ENABLE`):** range `DHCP_RANGE_START`–`DHCP_RANGE_END` with lease duration `DHCP_LEASE`; provides the gateway, the NAS as DNS, and, when NTP is active, the NAS as the time server. Disable the router's DHCP first to avoid two servers on the network.
 
-Para escolher o formato, altere `RAID_FILESYSTEM` na seção **CONFIGURAÇÃO** antes de executar, por exemplo:
+To choose the format, change `RAID_FILESYSTEM` in the **CONFIGURATION** section before running the script, for example:
 
 ```bash
 RAID_FILESYSTEM="xfs"
 ```
 
-Antes de configurar RAID ou storage, o script verifica o ponto de montagem configurado (`CRYPT_MOUNTPOINT` com LUKS, ou `RAID_MOUNTPOINT` sem LUKS). Se ele estiver montado ou registrado no `/etc/fstab`, ambas as etapas são puladas, inclusive com `--all`, sem alterar discos, keyfile, `fstab` ou `crypttab`. A detecção considera o destino de montagem, não valida a integridade do volume nem sua correspondência com os discos configurados. Se estiver desmontado ou com LUKS fechado, abra e monte o volume antes de executar os serviços que precisam dos dados. O RAID também é preservado quando `RAID_DEVICE` já existe.
+Before configuring RAID or storage, the script checks the configured mount point (`CRYPT_MOUNTPOINT` with LUKS, or `RAID_MOUNTPOINT` without LUKS). If it is mounted or listed in `/etc/fstab`, both steps are skipped, including with `--all`, without changing disks, the keyfile, `fstab`, or `crypttab`. The check considers the mount destination; it does not validate the volume's integrity or whether it matches the configured disks. If it is unmounted or LUKS is closed, open and mount the volume before running services that need the data. RAID is also preserved when `RAID_DEVICE` already exists.
 
-Quando não há montagem nem entrada existente no `fstab`, sem LUKS o formato é aplicado diretamente em `RAID_DEVICE`. Com LUKS, o contêiner criptografado fica em `CRYPT_DEVICE` e o sistema de arquivos é criado no volume aberto `/dev/mapper/$CRYPT_NAME`. O tipo escolhido também é gravado no `/etc/fstab`. Se o volume já tiver o mesmo sistema de arquivos, o script o preserva; se encontrar um formato diferente, interrompe a etapa para evitar uma montagem incorreta. Se não encontrar um sistema de arquivos, cria o escolhido.
+When there is no mount or existing `fstab` entry, the filesystem is applied directly to `RAID_DEVICE` without LUKS. With LUKS, the encrypted container is created on `CRYPT_DEVICE`, and the filesystem is created on the opened volume `/dev/mapper/$CRYPT_NAME`. The selected type is also written to `/etc/fstab`. If the volume already has the same filesystem, the script preserves it; if it finds a different format, it stops the step to prevent an incorrect mount. If no filesystem is found, it creates the selected one.
 
-**Atenção:** revise `RAID_DEVICES`, `RAID_DEVICE`, `RAID_FILESYSTEM`, `CRYPT_DEVICE` e as opções LUKS antes de executar. A criação do RAID apaga assinaturas dos discos selecionados após confirmação. A configuração LUKS e a criação do sistema de arquivos podem destruir dados existentes; mantenha backups. A etapa `--samba` substitui `/etc/samba/smb.conf`; guarda uma cópia inicial em `/etc/samba/smb.conf.orig` se ela ainda não existir.
+**Warning:** Review `RAID_DEVICES`, `RAID_DEVICE`, `RAID_FILESYSTEM`, `CRYPT_DEVICE`, and the LUKS options before running. RAID creation erases signatures on the selected disks after confirmation. LUKS setup and filesystem creation can destroy existing data; keep backups. The `--samba` step replaces `/etc/samba/smb.conf`; it saves an initial copy as `/etc/samba/smb.conf.orig` if one does not already exist.
 
-Exemplo para configurar o NAS completo depois de revisar os valores:
+Example: configure the complete NAS after reviewing the values:
 
 ```bash
 sudo bash nas-setup.sh --all
 ```
 
-Para rodar somente etapas específicas, por exemplo Samba e descoberta:
+To run only specific steps, such as Samba and discovery:
 
 ```bash
 sudo bash nas-setup.sh --samba --discovery
 ```
 
-## Serviço de estatísticas
+## Statistics service
 
-O agente `marcelinoServer.py` coleta carga, frequência e temperatura da CPU, memória, tempo ativo, rede, informações do sistema, sistemas de arquivos montados, discos físicos/SMART, estado e atividade dos arrays RAID via `/proc/mdstat`, configuração dos compartilhamentos Samba e estado/atividade DNS e DHCP. Frequência e temperatura são opcionais: aparecem indisponíveis se o hardware ou o sistema não expuserem esses dados. O JSON padrão chama-se `.marcelinoSrv.json`.
+The `marcelinoServer.py` agent collects CPU load, frequency, and temperature; memory; uptime; network; system information; mounted filesystems; physical disks/SMART; RAID array status and activity via `/proc/mdstat`; Samba share configuration; and DNS/DHCP status and activity. Frequency and temperature are optional: they appear as unavailable if the hardware or system does not expose the data. The default JSON filename is `.marcelinoSrv.json`.
 
-O instalador deve ser executado no servidor Debian com systemd. Mantenha `marcelinoServer.py` e `marcelinoServer.service` junto do script:
+The installer must be run on the Debian server with systemd. Keep `marcelinoServer.py` and `marcelinoServer.service` alongside the script:
 
 ```bash
 sudo bash nas-setup.sh --marcelino-server
 ```
 
-Ele instala `python3`, `python3-psutil` e `smartmontools`, copia os arquivos para `/opt/marcelinoServer`, instala a unidade em `/etc/systemd/system/marcelinoServer.service`, atualiza `/etc/default/marcelinoServer`, habilita a inicialização no boot e reinicia o serviço. `MARCELINOSRV_STATUS` usa `WEB_STATUS` (padrão `/srv/app/monitor/.marcelinoSrv.json`), compartilhando o destino com o dashboard e o share Monitor. Reinstalações atualizam os caminhos do script e do JSON e preservam as demais variáveis. Não é necessário configurar rede, Samba ou firewall para instalar apenas o agente. `--all` também instala o agente antes do dashboard; o instalador antigo permanece como atalho.
+It installs `python3`, `python3-psutil`, and `smartmontools`, copies the files to `/opt/marcelinoServer`, installs the unit at `/etc/systemd/system/marcelinoServer.service`, updates `/etc/default/marcelinoServer`, enables startup at boot, and restarts the service. `MARCELINOSRV_STATUS` uses `WEB_STATUS` (default `/srv/app/monitor/.marcelinoSrv.json`), sharing the destination with the dashboard and Monitor share. Reinstallations update the script and JSON paths while preserving the other variables. You do not need to configure networking, Samba, or the firewall to install only the agent. `--all` also installs the agent before the dashboard; the old installer remains as a wrapper.
 
-Para remover, use `sudo bash nas-setup.sh --uninstall-marcelino-server` (ou `--unistall-marcelino-server`). A remoção desativa o serviço e remove a unidade e o script instalado, preservando `/etc/default/marcelinoServer`, métricas e dependências compartilhadas.
+To remove it, use `sudo bash nas-setup.sh --uninstall-marcelino-server` (or `--unistall-marcelino-server`). Removal disables the service and removes the unit and installed script while preserving `/etc/default/marcelinoServer`, metrics, and shared dependencies.
 
-### Configuração do serviço
+### Service configuration
 
-A unidade lê suas variáveis de:
+The unit reads its variables from:
 
 ```text
 /etc/default/marcelinoServer
 ```
 
-Variáveis utilizadas pela unidade:
+Variables used by the unit:
 
-| Variável | Finalidade | Padrão do instalador |
+| Variable | Purpose | Installer default |
 |---|---|---|
-| `MARCELINOSRV_SCRIPT` | Caminho do agente Python. | `/opt/marcelinoServer/marcelinoServer.py` |
-| `MARCELINOSRV_STATUS` | Caminho completo do JSON publicado no share Monitor. | `WEB_STATUS`, padrão `/srv/app/monitor/.marcelinoSrv.json`. |
-| `MARCELINOSRV_INTERVAL` | Intervalo entre coletas, em segundos. | `5` |
-| `MARCELINOSRV_FILE_MODE` | Permissões Unix do JSON, em octal. | `0644` |
+| `MARCELINOSRV_SCRIPT` | Path to the Python agent. | `/opt/marcelinoServer/marcelinoServer.py` |
+| `MARCELINOSRV_STATUS` | Full path to the JSON published in the Monitor share. | `WEB_STATUS`, default `/srv/app/monitor/.marcelinoSrv.json`. |
+| `MARCELINOSRV_INTERVAL` | Interval between collections, in seconds. | `5` |
+| `MARCELINOSRV_FILE_MODE` | Unix permissions for the JSON file, in octal. | `0644` |
 
-O pacote `smartmontools` fornece `smartctl` para métricas SMART, `pciutils` fornece `lspci` para identificar GPUs e `fontconfig` fornece `fc-match` para detectar a fonte padrão. O agente continua funcionando sem esses comandos, mas as informações correspondentes ficam indisponíveis. `python3-psutil` é necessário para coletar as métricas do sistema.
+The `smartmontools` package provides `smartctl` for SMART metrics, `pciutils` provides `lspci` to identify GPUs, and `fontconfig` provides `fc-match` to detect the default font. The agent continues to work without these commands, but the corresponding information is unavailable. `python3-psutil` is required to collect system metrics.
 
-O agente também aceita `--smb-config`, `--public-share`, `--output`, `--interval` e `--file-mode` quando executado manualmente. A unidade systemd usa `--output`, `--interval` e `--file-mode`, obtidos do arquivo de ambiente. Se alterar o arquivo manualmente, reinicie a unidade para aplicar os valores.
+The agent also accepts `--smb-config`, `--public-share`, `--output`, `--interval`, and `--file-mode` when run manually. The systemd unit uses `--output`, `--interval`, and `--file-mode`, read from the environment file. If you edit the file manually, restart the unit to apply the values.
 
-Comandos usuais de operação:
+Common service commands:
 
 ```bash
 sudo systemctl status marcelinoServer.service
@@ -215,141 +239,141 @@ sudo systemctl stop marcelinoServer.service
 sudo journalctl -u marcelinoServer.service -f
 ```
 
-O serviço é executado como `root`, aguarda a rede e `smbd` e publica o arquivo atomicamente. Com `Restart=on-failure` e `RestartSec=5`, o systemd tenta reiniciar o agente cinco segundos após uma falha. O acesso ao arquivo também depende das permissões do diretório/share Samba.
+The service runs as `root`, waits for the network and `smbd`, and publishes the file atomically. With `Restart=on-failure` and `RestartSec=5`, systemd attempts to restart the agent five seconds after a failure. Access to the file also depends on the directory/Samba share permissions.
 
-## Dashboard web
+## Web dashboard
 
-O `marcelinoWeb.py` (somente biblioteca padrão do Python) lê o JSON publicado pelo `marcelinoServer` e o exibe em uma página com atualização a cada 5 s: sistema, CPU e memória, rede e internet, armazenamento, estado e sincronização do RAID, discos SMART, shares Samba, DNS/DHCP, leases e consultas bloqueadas. O acesso exige login.
+`marcelinoWeb.py` (Python standard library only) reads the JSON published by `marcelinoServer` and displays a page that refreshes every 5 seconds: system, CPU and memory, network and internet, storage, RAID status and synchronization, SMART disks, Samba shares, DNS/DHCP, leases, and blocked queries. Login is required.
 
-Instalação (`marcelinoWeb.py` e `marcelinoWeb.service` devem estar na pasta do `nas-setup.sh`):
+Installation (`marcelinoWeb.py` and `marcelinoWeb.service` must be in the same folder as `nas-setup.sh`):
 
 ```bash
 sudo bash nas-setup.sh --web
 ```
 
-Variáveis `WEB_*` no topo do `nas-setup.sh`:
+`WEB_*` variables at the top of `nas-setup.sh`:
 
-| Variável | Finalidade |
+| Variable | Purpose |
 |---|---|
-| `WEB_ENABLE` | `yes` instala o dashboard. |
-| `WEB_PORT` | Porta do serviço (portas abaixo de 1024 funcionam via `CAP_NET_BIND_SERVICE`). |
-| `WEB_STATUS` | JSON do `marcelinoServer` (padrão `/srv/app/monitor/.marcelinoSrv.json`), também usado ao instalar o agente. |
-| `WEB_USER` | Usuário de sistema sem privilégios que executa o serviço. |
-| `WEB_ADMIN` | Usuário web inicial; padrão `USER_NAME`, com a senha `USER_PASSWORD`. Vazio = cadastre depois. |
-| `WEB_TLS` | `yes` gera certificado autoassinado e serve HTTPS; o navegador mostra um aviso na primeira visita. |
+| `WEB_ENABLE` | `yes` installs the dashboard. |
+| `WEB_PORT` | Service port (ports below 1024 work via `CAP_NET_BIND_SERVICE`). |
+| `WEB_STATUS` | `marcelinoServer` JSON (default `/srv/app/monitor/.marcelinoSrv.json`), also used when installing the agent. |
+| `WEB_USER` | Unprivileged system user that runs the service. |
+| `WEB_ADMIN` | Initial web user; defaults to `USER_NAME` with password `USER_PASSWORD`. Empty = add later. |
+| `WEB_TLS` | `yes` generates a self-signed certificate and serves HTTPS; the browser shows a warning on the first visit. |
 
-Com `WEB_TLS=yes` a porta serve apenas HTTPS; acesse `https://IP_DO_NAS:PORTA` (por exemplo `https://192.168.100.1:443`). O firewall libera a porta somente para `LAN_CIDR` quando `--web` é executado.
+With `WEB_TLS=yes`, the port serves HTTPS only; visit `https://NAS_IP:PORT` (for example, `https://192.168.100.1:443`). The firewall allows the port only for `LAN_CIDR` when `--web` is run.
 
-### Usuários
+### Users
 
 ```bash
-sudo marcelinoWeb useradd NOME   # senha mínima de 8 caracteres
-sudo marcelinoWeb passwd NOME
-sudo marcelinoWeb userdel NOME
+sudo marcelinoWeb useradd NAME   # password must be at least 8 characters
+sudo marcelinoWeb passwd NAME
+sudo marcelinoWeb userdel NAME
 sudo marcelinoWeb users
 ```
 
-Os usuários ficam em `/etc/marcelinoWeb/users.json` (modo 600, senhas com PBKDF2-SHA256). As sessões duram 8 h em cookie `HttpOnly`/`SameSite=Strict`, e 5 falhas de login seguidas bloqueiam o IP por 5 min. Configuração do serviço em `/etc/default/marcelinoWeb`.
+Users are stored in `/etc/marcelinoWeb/users.json` (mode 600, passwords hashed with PBKDF2-SHA256). Sessions last 8 hours using `HttpOnly`/`SameSite=Strict` cookies, and 5 consecutive failed logins block the IP for 5 minutes. Service configuration is in `/etc/default/marcelinoWeb`.
 
 ```bash
 sudo systemctl status marcelinoWeb.service
 sudo journalctl -u marcelinoWeb.service -n 50 --no-pager
 ```
 
-## Instalar o cliente Windows
+## Install the Windows client
 
-O instalador cria um ambiente Python temporário, instala os pacotes de `requirements.txt`, empacota `marcelinoClient.py` com PyInstaller e cria atalhos no Desktop e Menu Iniciar. Execute no PowerShell:
+The installer creates a temporary Python environment, installs the packages from `requirements.txt`, packages `marcelinoClient.py` with PyInstaller, and creates Desktop and Start Menu shortcuts. Run it in PowerShell:
 
 ```powershell
 Set-ExecutionPolicy -Scope Process RemoteSigned
 .\install_marcelinoClient.ps1
 ```
 
-O executável é instalado em `%LOCALAPPDATA%\Programs\MarcelinoClient\MarcelinoClient.exe`. As principais dependências incluem CustomTkinter, `smbprotocol`, Paramiko e `pyte`.
+The executable is installed at `%LOCALAPPDATA%\Programs\MarcelinoClient\MarcelinoClient.exe`. Main dependencies include CustomTkinter, `smbprotocol`, Paramiko, and `pyte`.
 
-## Telas e funcionalidades do cliente
+## Client screens and features
 
-O cliente inicia na tela de login. Depois de autenticar no servidor SMB, abre a área principal, onde as abas compartilham a mesma sessão. O cabeçalho mostra usuário e servidor; **Desconectar** encerra a sessão SMB e SSH e retorna ao login.
+The client opens on the login screen. After authenticating with the SMB server, it opens the main area, where tabs share the same session. The header shows the user and server; **Desconectar** (Disconnect) ends the SMB and SSH sessions and returns to login.
 
-### Prévia local
+### Local preview
 
-Para inspecionar uma aba sem autenticar ou conectar a um servidor, execute `preview_marcelinoClient.py` no ambiente Python do projeto e informe a tela desejada:
+To inspect a tab without authenticating or connecting to a server, run `preview_marcelinoClient.py` in the project's Python environment and specify the desired screen:
 
 ```powershell
 .\.venv\Scripts\python.exe preview_marcelinoClient.py --screen Sistema
 .\.venv\Scripts\python.exe preview_marcelinoClient.py --screen "DNS / DHCP"
 ```
 
-As opções de `--screen` são `Sistema`, `Discos`, `RAID`, `Internet`, `DNS / DHCP`, `Compartilhamentos`, `Backup` e `Terminal`. O preview usa dados genéricos locais; a tela RAID mostra um array de demonstração em recuperação, e Backup e Terminal também mostram exemplos sem iniciar transferências nem conexão SSH.
+The `--screen` options are `Sistema` (System), `Discos` (Disks), `RAID`, `Internet`, `DNS / DHCP`, `Compartilhamentos` (Shares), `Backup`, and `Terminal`. The preview uses generic local data; the RAID screen shows a demo array recovering, and Backup and Terminal also show examples without starting transfers or an SSH connection.
 
 ### Login
 
-Selecione um servidor da lista, informe usuário e senha Samba e escolha **Validar e conectar**. **Procurar na rede** procura servidores SMB na rede local e atualiza as opções disponíveis.
+Select a server from the list, enter the Samba username and password, and choose **Validar e conectar** (Validate and connect). **Procurar na rede** (Browse network) searches the local network for SMB servers and updates the available options.
 
-![Tela de login do cliente](assets/01_tela_login.png)
+![Client login screen](assets/01_tela_login.png)
 
-### Sistema
+### System
 
-Mostra carga, frequência e temperatura da CPU, uso de memória, tempo ativo, tráfego de rede e identificação de sistema/hardware. Frequência e temperatura aparecem como `n/d` quando indisponíveis; uptime e tráfego de rede são apresentados em painéis compactos. O intervalo pode ser escolhido entre 1 e 300 segundos; a escolha é salva e restaurada na próxima abertura. **Atualizar agora** solicita uma nova leitura.
+Shows CPU load, frequency and temperature, memory usage, uptime, network traffic, and system/hardware identification. Frequency and temperature appear as `n/d` when unavailable; uptime and network traffic are shown in compact panels. The interval can be set from 1 to 300 seconds; the selection is saved and restored the next time the client opens. **Atualizar agora** (Refresh now) requests a new reading.
 
-![Painel de sistema](assets/02_tela_sistema.png)
+![System dashboard](assets/02_tela_sistema.png)
 
-### Discos
+### Disks
 
-Apresenta barras de uso dos sistemas de arquivos montados e uma tabela dos discos físicos com modelo, capacidade, temperatura e status SMART. Os dados SMART dependem do `smartmontools`/`smartctl` no servidor.
+Displays usage bars for mounted filesystems and a table of physical disks with model, capacity, temperature, and SMART status. SMART data requires `smartmontools`/`smartctl` on the server.
 
-![Sistemas de arquivos e discos SMART](assets/03_tela_discos.png)
+![Filesystems and SMART disks](assets/03_tela_discos.png)
 
 ### RAID
 
-Mostra o estado geral dos arrays RAID detectados pelo agente e, para cada array, dispositivo, nível, estado, quantidade de discos ativos e atividade de sincronização. O campo **Atividade** indica operações em andamento, como `resync`, `recovery`, `reshape` ou `check`, com o percentual informado pelo sistema; `--` significa que nenhuma atividade com progresso foi reportada. Os dados vêm de `/proc/mdstat` no servidor Linux e exigem uma versão do agente que publique o campo `raid` no JSON.
+Shows the overall status of RAID arrays detected by the agent and, for each array, its device, level, state, number of active disks, and synchronization activity. **Activity** indicates ongoing operations such as `resync`, `recovery`, `reshape`, or `check`, with the percentage reported by the system; `--` means no activity with progress was reported. Data comes from `/proc/mdstat` on the Linux server and requires an agent version that publishes the `raid` field in the JSON.
 
 ### Internet
 
-Mostra o IP local e remoto, além de testes de velocidade de download, upload e ping. Os resultados são apresentados em uma tabela com timestamp, taxa de download, taxa de upload, ping e servidor utilizado para o teste.
+Shows local and remote IP addresses, as well as download, upload, and ping speed tests. Results are shown in a table with timestamp, download rate, upload rate, ping, and the server used for the test.
 
-![Teste de velocidade de internet](assets/04_tela_internet.png)
+![Internet speed test](assets/04_tela_internet.png)
 
 ### DNS / DHCP
 
-Exibe o estado do serviço DNS/DHCP, incluindo se está ativo, se o DNS e o DHCP estão habilitados, a contagem de leases e os eventos permitidos e bloqueados. Mostra também os leases atuais com IP, hostname, MAC e tempo de expiração.
+Displays DNS/DHCP service status, including whether it is active, whether DNS and DHCP are enabled, the lease count, and allowed and blocked events. It also shows current leases with IP, hostname, MAC address, and expiration time.
 
-![Configurações de DNS e DHCP](assets/05_tela_dns_dhcp.png)
+![DNS and DHCP settings](assets/05_tela_dns_dhcp.png)
 
-### Compartilhamentos
+### Shares
 
-Lista os shares publicados pelo Samba, caminho e regras configuradas: usuários/grupos permitidos, listas de leitura e escrita, administradores, bloqueados, acesso de convidados e modo somente leitura. O agente extrai essas diretivas do `smb.conf` e as publica no JSON de estatísticas; grupos são exibidos como configurados, por exemplo `@nasgroup`.
+Lists Samba shares, paths, and configured rules: allowed users/groups, read and write lists, administrators, blocked users, guest access, and read-only mode. The agent extracts these directives from `smb.conf` and publishes them in the statistics JSON; groups are shown as configured, for example `@nasgroup`.
 
-![Compartilhamentos Samba e regras de acesso](assets/06_tela_compartilhamentos.png)
+![Samba shares and access rules](assets/06_tela_compartilhamentos.png)
 
 ### Backup
 
-Navegue pelos compartilhamentos acessíveis para escolher o destino, adicione pastas locais de origem, inicie o backup e acompanhe o progresso e o log. Arquivos que já estão atualizados no destino são ignorados; o botão **Cancelar** interrompe a operação.
+Browse accessible shares to choose a destination, add local source folders, start the backup, and monitor progress and the log. Files that are already up to date at the destination are skipped; **Cancelar** (Cancel) stops the operation.
 
-![Tela de backup](assets/07_tela_backup.png)
+![Backup screen](assets/07_tela_backup.png)
 
 ### Terminal
 
-Conecta por SSH ao servidor e usuário da sessão autenticada. Permite usar senha SMB como autenticação e selecionar um arquivo de chave privada, com passphrase opcional. A primeira conexão com um host desconhecido pede confirmação digitando `yes` e salva a chave em `~/.ssh/known_hosts`. O terminal emula ANSI e aceita entrada interativa para comandos e aplicações TUI, como `btop`.
+Connects over SSH to the server using the authenticated session's user. You can use the SMB password for authentication and select a private key file, with an optional passphrase. The first connection to an unknown host asks you to confirm by typing `yes` and saves the key in `~/.ssh/known_hosts`. The terminal emulates ANSI and supports interactive input for commands and TUI applications such as `btop`.
 
-![Terminal SSH](assets/08_tela_terminal.png)
+![SSH terminal](assets/08_tela_terminal.png)
 
-### SSH Conectado
+### Connected SSH
 
-Mostra o estado da conexão SSH ativa com o servidor, incluindo o usuário conectado e o host. Permite interagir com o servidor através de um terminal SSH em tempo real.
+Shows the active SSH connection status, including the connected user and host. You can interact with the server through a live SSH terminal.
 
-![Terminal SSH](assets/09_tela_sshconectado.png)
+![Connected SSH terminal](assets/09_tela_sshconectado.png)
 
-## Fluxo de dados
+## Data flow
 
 ```text
 marcelinoServer.py
-    -> coleta métricas, estado RAID e diretivas de smb.conf
-    -> publica .marcelinoSrv.json no share público
-    -> cliente SMB lê e apresenta os dados nas abas Sistema, Discos, RAID e Compartilhamentos
+    -> collects metrics, RAID status, and smb.conf directives
+    -> publishes .marcelinoSrv.json to the public share
+    -> the SMB client reads and displays data in the System, Disks, RAID, and Shares tabs
 
 marcelino Client
-    -> acessa arquivos e destinos por SMB
-    -> envia backups para o compartilhamento escolhido
-    -> abre um terminal interativo SSH para o mesmo servidor
+    -> accesses files and destinations over SMB
+    -> sends backups to the selected share
+    -> opens an interactive SSH terminal to the same server
 ```
