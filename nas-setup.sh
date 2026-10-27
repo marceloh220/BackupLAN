@@ -111,8 +111,8 @@ NTP_ENABLE="yes"                              # yes = install and configure chro
 NTP_UPSTREAM=("pool.ntp.br" "a.st1.ntp.br")   # External time sources
 
 # --- Internet speed test ---
-SPEEDTEST_ENABLE="yes"                                  # yes = install nas-speedtest and its timers
-SPEEDTEST_LOG="/var/log/nas-speedtest.jsonl"             # Test log
+SPEEDTEST_ENABLE="yes"                                  # yes = install marcelinoSpeedtest and its timers
+SPEEDTEST_LOG="/var/log/marcelinoSpeedtest.jsonl"             # Test log
 SPEEDTEST_OUT="$USER_HOME/internet_test"        # Charts saved in year/month subdirectories here
 SPEEDTEST_GRAPH_TIME="23:55"                             # Daily chart time (last 24 hours)
 
@@ -854,20 +854,20 @@ setup_speedtest() {
   [[ "$SPEEDTEST_ENABLE" == "yes" ]] || return 0
   ensure_packages python3 speedtest-cli python3-matplotlib
   local src
-  src="$(dirname "$(readlink -f "$0")")/nas-speedtest.py"
+  src="$(dirname "$(readlink -f "$0")")/marcelinoSpeedtest.py"
   [[ -f "$src" ]] || die "$src não encontrado."
   log "Instalando teste de velocidade da internet..."
   setup_user
 
-  install -m 755 "$src" /usr/local/bin/nas-speedtest
-  sed -i "s|^DEFAULT_LOG = .*|DEFAULT_LOG = \"$SPEEDTEST_LOG\"|; s|^DEFAULT_OUT = .*|DEFAULT_OUT = \"$SPEEDTEST_OUT\"|" /usr/local/bin/nas-speedtest
+  install -m 755 "$src" /usr/local/bin/marcelinoSpeedtest
+  sed -i "s|^DEFAULT_LOG = .*|DEFAULT_LOG = \"$SPEEDTEST_LOG\"|; s|^DEFAULT_OUT = .*|DEFAULT_OUT = \"$SPEEDTEST_OUT\"|" /usr/local/bin/marcelinoSpeedtest
 
   mkdir -p "$SPEEDTEST_OUT"
   id "$SAMBA_USER" >/dev/null 2>&1 && chown "$SAMBA_USER":"$(id -gn "$SAMBA_USER")" "$SPEEDTEST_OUT"
   touch "$SPEEDTEST_LOG"
   chmod 644 "$SPEEDTEST_LOG"
 
-  cat > /etc/systemd/system/nas-speedtest.service <<'EOF'
+  cat > /etc/systemd/system/marcelinoSpeedtest.service <<'EOF'
 [Unit]
 Description=Teste de velocidade da internet
 Wants=network-online.target
@@ -875,9 +875,9 @@ After=network-online.target
 
 [Service]
 Type=oneshot
-ExecStart=/usr/local/bin/nas-speedtest test
+ExecStart=/usr/local/bin/marcelinoSpeedtest test
 EOF
-  cat > /etc/systemd/system/nas-speedtest.timer <<'EOF'
+  cat > /etc/systemd/system/marcelinoSpeedtest.timer <<'EOF'
 [Unit]
 Description=Teste de velocidade da internet de hora em hora
 
@@ -888,15 +888,15 @@ Persistent=true
 [Install]
 WantedBy=timers.target
 EOF
-  cat > /etc/systemd/system/nas-speedtest-graph.service <<'EOF'
+  cat > /etc/systemd/system/marcelinoSpeedtest-graph.service <<'EOF'
 [Unit]
 Description=Gráfico diário da velocidade da internet
 
 [Service]
 Type=oneshot
-ExecStart=/usr/local/bin/nas-speedtest graph --hours 24
+ExecStart=/usr/local/bin/marcelinoSpeedtest graph --hours 24
 EOF
-  cat > /etc/systemd/system/nas-speedtest-graph.timer <<EOF
+  cat > /etc/systemd/system/marcelinoSpeedtest-graph.timer <<EOF
 [Unit]
 Description=Gráfico diário da velocidade da internet
 
@@ -908,7 +908,7 @@ Persistent=true
 WantedBy=timers.target
 EOF
   systemctl daemon-reload
-  systemctl enable --now nas-speedtest.timer nas-speedtest-graph.timer
+  systemctl enable --now marcelinoSpeedtest.timer marcelinoSpeedtest-graph.timer
 }
 
 setup_marcelino_server() {
@@ -1281,12 +1281,12 @@ uninstall_dns() {
 }
 
 uninstall_speedtest() {
-  systemctl disable --now nas-speedtest.timer nas-speedtest-graph.timer 2>/dev/null || true
-  rm -f /etc/systemd/system/nas-speedtest.service \
-    /etc/systemd/system/nas-speedtest.timer \
-    /etc/systemd/system/nas-speedtest-graph.service \
-    /etc/systemd/system/nas-speedtest-graph.timer \
-    /usr/local/bin/nas-speedtest
+  systemctl disable --now marcelinoSpeedtest.timer marcelinoSpeedtest-graph.timer 2>/dev/null || true
+  rm -f /etc/systemd/system/marcelinoSpeedtest.service \
+    /etc/systemd/system/marcelinoSpeedtest.timer \
+    /etc/systemd/system/marcelinoSpeedtest-graph.service \
+    /etc/systemd/system/marcelinoSpeedtest-graph.timer \
+    /usr/local/bin/marcelinoSpeedtest
   purge_packages speedtest-cli python3-matplotlib
   systemctl daemon-reload
 }

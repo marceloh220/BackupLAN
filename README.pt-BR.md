@@ -11,10 +11,9 @@ Uma versão alternativa multiplataforma em .NET do Marcelino Client está dispon
 | Componente | Arquivo | Função |
 |---|---|---|
 | Configuração do NAS | `nas-setup.sh` | Prepara IP estático, armazenamento, Samba, descoberta de rede, NTP, DNS/DHCP com bloqueio de anúncios/rastreadores e firewall. |
-| Teste de velocidade | `nas-speedtest.py` | Mede download, upload e ping; registra resultados em JSONL, lista testes e gera gráficos. |
+| Teste de velocidade | `marcelinoSpeedtest.py` | Mede download, upload e ping; registra resultados em JSONL, lista testes e gera gráficos. |
 | Agente de estatísticas | `marcelinoServer.py` | Publica métricas do servidor, estado dos arrays RAID e regras de compartilhamento Samba em JSON. |
 | Serviço systemd | `marcelinoServer.service` | Executa o agente após a inicialização do sistema. |
-| Instalador do agente | `install_marcelinoServer.sh` | Atalho compatível para `nas-setup.sh --marcelino-server`. |
 | Dashboard web | `marcelinoWeb.py`, `marcelinoWeb.service` | Servidor web com login que exibe as métricas publicadas pelo agente, incluindo estado e sincronização do RAID, acessível pela rede local. |
 | Cliente Windows | `marcelinoClient.py` | Interface para métricas do servidor, discos e RAID, compartilhamentos, backup/restauração e terminal SSH. |
 | Prévia do cliente | `preview_marcelinoClient.py` | Abre uma aba com dados genéricos locais, sem conexão com servidor. |
@@ -113,22 +112,24 @@ Para remover, execute `sudo bash nas-setup.sh --uninstall-syncthing`. O serviço
 
 ### Teste de velocidade da internet
 
-A etapa `--speedtest` (`SPEEDTEST_ENABLE`) instala `speedtest-cli` e `python3-matplotlib`, copia `nas-speedtest.py` para `/usr/local/bin/nas-speedtest` e ativa dois timers:
+A etapa `--speedtest` (`SPEEDTEST_ENABLE`) instala `speedtest-cli` e `python3-matplotlib`, copia `marcelinoSpeedtest.py` para `/usr/local/bin/marcelinoSpeedtest` e ativa dois timers:
 
-- `nas-speedtest.timer`: um teste de hora em hora, gravado em `SPEEDTEST_LOG` (`/var/log/nas-speedtest.jsonl`).
-- `nas-speedtest-graph.timer`: todo dia às `SPEEDTEST_GRAPH_TIME` (23:55) gera o gráfico das últimas 24 horas em `SPEEDTEST_OUT/ANO/MES/` (padrão `/srv/marcelo/internet_test`), a pasta é escolhida pela data do gráfico.
+- `marcelinoSpeedtest.timer`: um teste de hora em hora, gravado em `SPEEDTEST_LOG` (padrão `/var/log/marcelinoSpeedtest.jsonl`).
+- `marcelinoSpeedtest-graph.timer`: todo dia às `SPEEDTEST_GRAPH_TIME` (23:55) gera o gráfico das últimas 24 horas em `SPEEDTEST_OUT/ANO/MES/` (padrão `/srv/marcelo/internet_test`), a pasta é escolhida pela data do gráfico.
+
+Ao atualizar uma instalação existente, os timers e o log antigos `nas-speedtest` não são migrados automaticamente. Desative os timers antigos com `sudo systemctl disable --now nas-speedtest.timer nas-speedtest-graph.timer`; o log anterior em `/var/log/nas-speedtest.jsonl` permanece separado e não aparece no histórico novo do dashboard.
 
 Uso manual:
 
 ```bash
-sudo nas-speedtest test              # teste novo, registrado no log
-nas-speedtest log -n 10              # últimos 10 testes
-nas-speedtest --log /caminho/log.jsonl log -n 10  # usa outro arquivo de log
-sudo nas-speedtest graph -n 24       # gráfico dos últimos 24 testes
-sudo nas-speedtest graph --hours 24  # gráfico das últimas 24 horas
+sudo marcelinoSpeedtest test              # teste novo, registrado no log
+marcelinoSpeedtest log -n 10              # últimos 10 testes
+marcelinoSpeedtest --log /caminho/log.jsonl log -n 10  # usa outro arquivo de log
+sudo marcelinoSpeedtest graph -n 24       # gráfico dos últimos 24 testes
+sudo marcelinoSpeedtest graph --hours 24  # gráfico das últimas 24 horas
 ```
 
-No subcomando `log`, use `-n` para definir a quantidade de testes. A opção global `--log` indica o caminho do arquivo JSON; por isso, `nas-speedtest --log 10 log` procura um arquivo chamado `10` e pode informar que não há testes registrados.
+No subcomando `log`, use `-n` para definir a quantidade de testes. A opção global `--log` indica o caminho do arquivo JSON; por isso, `marcelinoSpeedtest --log 10 log` procura um arquivo chamado `10` e pode informar que não há testes registrados.
 
 Os gráficos incluem grades major e minor, com estilos distintos para facilitar a leitura.
 
@@ -137,29 +138,29 @@ Os gráficos incluem grades major e minor, com estilos distintos para facilitar 
 Consulte o estado dos timers e os próximos horários programados:
 
 ```bash
-systemctl list-timers --all 'nas-speedtest*'
-sudo systemctl status nas-speedtest.timer nas-speedtest-graph.timer
+systemctl list-timers --all 'marcelinoSpeedtest*'
+sudo systemctl status marcelinoSpeedtest.timer marcelinoSpeedtest-graph.timer
 ```
 
 Para executar cada tarefa imediatamente, sem esperar pelo próximo horário:
 
 ```bash
-sudo systemctl start nas-speedtest.service        # executa um teste e atualiza o log
-sudo systemctl start nas-speedtest-graph.service  # gera o gráfico das últimas 24 horas
+sudo systemctl start marcelinoSpeedtest.service        # executa um teste e atualiza o log
+sudo systemctl start marcelinoSpeedtest-graph.service  # gera o gráfico das últimas 24 horas
 ```
 
 Para pausar os agendamentos e impedir que voltem após reiniciar, ou para reativá-los:
 
 ```bash
-sudo systemctl disable --now nas-speedtest.timer nas-speedtest-graph.timer
-sudo systemctl enable --now nas-speedtest.timer nas-speedtest-graph.timer
+sudo systemctl disable --now marcelinoSpeedtest.timer marcelinoSpeedtest-graph.timer
+sudo systemctl enable --now marcelinoSpeedtest.timer marcelinoSpeedtest-graph.timer
 ```
 
 Consulte a saída das últimas execuções pelo journal do systemd:
 
 ```bash
-sudo journalctl -u nas-speedtest.service -n 50 --no-pager
-sudo journalctl -u nas-speedtest-graph.service -n 50 --no-pager
+sudo journalctl -u marcelinoSpeedtest.service -n 50 --no-pager
+sudo journalctl -u marcelinoSpeedtest-graph.service -n 50 --no-pager
 ```
 
 Os PNG são nomeados `speedtest_AAAA-MM-DD_<periodo>.png` (por exemplo `speedtest_2026-10-15_24h.png`), com a data do último resultado incluído, e herdam o dono da pasta base.

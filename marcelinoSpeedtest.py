@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """
-    file: nas-speedtest.py
+    file: marcelinoSpeedtest.py
     Description: Measure internet speed, log results, and generate PNG charts.
     Usage:
-    nas-speedtest test                    run a new test and save it to the log
-    nas-speedtest log [-n 10]             show the last n tests
-        nas-speedtest --log FILE log -n 10 use another file and show the last 10 tests
-    nas-speedtest graph [-n 24]           chart the last n tests
-    nas-speedtest graph --hours 24        chart the last 24 hours
+    marcelinoSpeedtest test                    run a new test and save it to the log
+    marcelinoSpeedtest log [-n 10]             show the last n tests
+    marcelinoSpeedtest --log FILE log -n 10    use another file and show the last 10 tests
+    marcelinoSpeedtest graph [-n 24]           chart the last n tests
+    marcelinoSpeedtest graph --hours 24        chart the last 24 hours
 
     --log sets the JSON file path; -n sets how many tests to list.
 
@@ -49,7 +49,7 @@ import sys
 from datetime import datetime, timedelta
 from pathlib import Path
 
-DEFAULT_LOG = "/var/log/nas-speedtest.jsonl"
+DEFAULT_LOG = "/var/log/marcelinoSpeedtest.jsonl"
 DEFAULT_OUT = "/srv/marcelo/internet_test"
 # speedtest-cli returns 1800000 ms when the server's latency probes fail.
 PING_INVALID_MS = 10000
@@ -169,6 +169,7 @@ def cmd_log(args):
 
 def match_owner(path, reference):
     if sys.platform != "linux":
+        sys.exit(f"Aviso: marcelinoSpeedtest só é suportado em Linux (sistema atual: {sys.platform}).")
         return
     st = os.stat(reference)
     try:
@@ -191,6 +192,9 @@ def make_dirs(base, year, month):
 
 
 def cmd_graph(args):
+    if sys.platform != "linux":
+        sys.exit(f"Aviso: marcelinoSpeedtest só é suportado em Linux (sistema atual: {sys.platform}).")
+        return
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.dates as mdates
@@ -238,7 +242,7 @@ def cmd_graph(args):
 
 def main():
     if sys.platform != "linux":
-        sys.exit(f"Aviso: nas-speedtest só é suportado em Linux (sistema atual: {sys.platform}).")
+        sys.exit(f"Aviso: marcelinoSpeedtest só é suportado em Linux (sistema atual: {sys.platform}).")
         return
     parser = argparse.ArgumentParser(description="Teste de velocidade da internet do NAS")
     parser.add_argument("--log", default=DEFAULT_LOG,
@@ -266,7 +270,7 @@ def main():
     args = parser.parse_args()
     if args.cmd in ("test", "graph") and os.geteuid() != 0:
         sys.exit(f"Erro: '{args.cmd}' grava em {args.log if args.cmd == 'test' else args.output_dir} "
-                 f"e precisa ser executado como root. Use: sudo nas-speedtest {args.cmd}")
+                 f"e precisa ser executado como root. Use: sudo marcelinoSpeedtest {args.cmd}")
     if getattr(args, "n", 1) < 1 or (getattr(args, "hours", None) is not None and args.hours < 1):
         parser.error("n e hours devem ser maiores que zero")
     sys.exit(args.func(args))
