@@ -39,13 +39,16 @@ Each service option installs its dependencies, configures the service, and opens
 | `--ntp` / `--uninstall-ntp` | Configures/removes chrony as the LAN time server, including the NTP port. |
 | `--dns` / `--uninstall-dns` | Configures/removes dnsmasq for LAN DNS and DHCP (see below), restoring the `resolv.conf` backup when removed. |
 | `--speedtest` / `--uninstall-speedtest` | Installs/removes the command and speed-test/chart timers; existing logs and charts are preserved. |
+| `--iperf3` / `--uninstall-iperf3` | Installs/removes the iperf3 LAN speed-test server, its systemd service, and TCP/UDP firewall rules. |
+| `--start-iperf3` / `--stop-iperf3` / `--restart-iperf3` | Starts, stops, or restarts the installed iperf3 server. |
+| `--enable-iperf3` / `--disable-iperf3` | Enables/disables iperf3 startup at boot without starting/stopping the running service. |
 | `--marcelino-server` / `--uninstall-marcelino-server` | Installs/removes the metrics agent without opening ports; configuration and existing JSON are preserved on removal. |
 | `--web` / `--uninstall-web` | Installs/removes the dashboard and its firewall rule; users, certificates, and persistent configuration are preserved. |
 | `--anytype` / `--uninstall-anytype` | Configures/removes the Anytype service in Docker and its daily backup timer; data and backups are preserved, and Docker is disabled/removed only if there are no other active containers. |
 | `--syncthing` / `--uninstall-syncthing` | Installs/removes Syncthing as the primary user's service, with LAN synchronization ports; configuration, identity, and synced folders are preserved. |
 | `--ssh` / `--uninstall-ssh` | Installs/configures or removes the SSH server, managed settings, and the `SSH_PORT` rule. Uninstalling ends remote SSH access. |
 | `--dlna` / `--uninstall-dlna` | Installs/removes MiniDLNA and opens/closes SSDP and the `DLNA_PORT`; media, database/cache, and logs are preserved. |
-| `--all` | Configures networking, RAID, storage, the user, and all services, including SSH, Syncthing, and DLNA. It does not uninstall anything. |
+| `--all` | Configures networking, RAID, storage, the user, and all services, including SSH, iperf3, Syncthing, and DLNA. It does not uninstall anything. |
 
 Uninstall options also accept the misspelled `--unistall-*` form for compatibility. There is no RAID or storage uninstall option: no removal option deletes partitions, changes LUKS, unmounts volumes, or disables RAID arrays. The firewall is not reset; only rules for the selected step are changed.
 
@@ -109,6 +112,40 @@ To remove it, run `sudo bash nas-setup.sh --uninstall-syncthing`. The service, p
 
 `--dlna` installs MiniDLNA and requires the storage volume to be mounted first. Adjust `DLNA_ENABLE`, `DLNA_PORT`, `DLNA_MEDIA_MUSIC`, `DLNA_MEDIA_VIDEO`, `DLNA_MEDIA_PICTURES`, `DLNA_CACHE`, and `DLNA_LOG` at the top of `nas-setup.sh`. The UFW rule is created with the service; to remove MiniDLNA and close the ports, run `sudo bash nas-setup.sh --uninstall-dlna` (or `--unistall-dlna`). Removal preserves media, the database/cache, and logs.
 
+### LAN speed test (iperf3)
+
+Unlike `--speedtest`, which tests the internet connection, `--iperf3` measures throughput between another computer and the NAS. It installs the Debian `iperf3` package and creates `/etc/systemd/system/iperf3.service`, running in server mode as a dynamic, unprivileged user. Installation starts the server immediately and enables it at boot.
+
+Set `IPERF3_ENABLE` (default `yes`) and `IPERF3_PORT` (default `5201`, valid range 1-65535) at the top of `nas-setup.sh`. The `--all` setup includes this step. Setting `IPERF3_ENABLE=no` skips future installations, including with `--all`; it does not stop or disable an existing service.
+
+```bash
+sudo bash nas-setup.sh --iperf3                 # alias: --install-iperf3
+sudo bash nas-setup.sh --start-iperf3
+sudo bash nas-setup.sh --stop-iperf3
+sudo bash nas-setup.sh --restart-iperf3
+sudo bash nas-setup.sh --enable-iperf3          # enable at boot only
+sudo bash nas-setup.sh --disable-iperf3         # disable at boot only
+```
+
+These controls use `systemctl` on `iperf3.service`; they do not reinstall packages or change the firewall. To stop the server now and prevent startup at boot, combine `--stop-iperf3 --disable-iperf3`. Check status and logs with:
+
+```bash
+sudo systemctl status iperf3.service
+sudo journalctl -u iperf3.service -n 50 --no-pager
+```
+
+UFW allows only `LAN_CIDR` to access `IPERF3_PORT` over TCP and UDP. No router port forwarding is needed. Install iperf3 on another LAN computer and run the following there, replacing the IP and port if needed:
+
+```bash
+iperf3 -c 192.168.0.1 -p 5201                  # TCP: computer -> NAS
+iperf3 -c 192.168.0.1 -p 5201 -R               # TCP: NAS -> computer
+iperf3 -c 192.168.0.1 -p 5201 -u -b 100M       # UDP: target 100 Mbit/s
+```
+
+Tests consume network capacity and may affect other transfers. Unlike the internet speed-test tool, this service does not schedule tests or generate JSONL history or charts.
+
+To remove the server, run `sudo bash nas-setup.sh --uninstall-iperf3` (alias `--unistall-iperf3`). This stops and disables the service, removes its unit and package, and deletes its TCP/UDP rules. Keep `IPERF3_PORT` and `LAN_CIDR` set to the installed values when removing it so the matching rules are deleted.
+
 ### Internet speed test
 
 The `--speedtest` step (`SPEEDTEST_ENABLE`) installs `speedtest-cli` and `python3-matplotlib`, copies `marcelinoSpeedtest.py` to `/usr/local/bin/marcelinoSpeedtest`, and enables two timers:
@@ -167,7 +204,7 @@ PNG files are named `speedtest_YYYY-MM-DD_<period>.png` (for example, `speedtest
 ### Static IP, DNS, and DHCP
 
 - **Static IP (`--network`):** controlled by `NET_STATIC`, `NAS_IP`, `NAS_PREFIX`, `NET_IFACE`, and `NET_GATEWAY`. Empty interface and gateway values are detected from the default route. If `LAN_CIDR` is empty, it is derived from `NAS_IP/NAS_PREFIX`.
-- **DNS (`--dns`, `DNS_ENABLE`):** dnsmasq with caching, external resolvers in `DNS_UPSTREAM`, and local domain `DNS_DOMAIN`. DHCP clients are registered by name (`pc1` and `pc1.lan`), and the NAS itself resolves to `NAS_IP`. Hosts with static IPs need an entry in the NAS `/etc/hosts` or a `dhcp-host=` entry in `/etc/dnsmasq.d/nas.conf`; the script keeps a filtered copy at `/var/lib/nas-dns/hosts`, removing loopback entries (`127.x.x.x` and `::1`) before serving them on the LAN. Re-run `sudo bash nas-setup.sh --dns` after changing `/etc/hosts`. `systemd-resolved` is disabled and the NAS `/etc/resolv.conf` points to `127.0.0.1`. The configuration enables `log-queries=extra` and `log-dhcp`; allowed/blocked access lists show events from the last hour. The agent stores classified events in `/var/log/marcelinoServer/dnsmasq-access.jsonl`, with 5 MB rotation and three backups; the original journal can be viewed with `journalctl -u dnsmasq`.
+- **DNS (`--dns`, `DNS_ENABLE`):** dnsmasq with caching, external resolvers in `DNS_UPSTREAM`, and local domain `DNS_DOMAIN`. DHCP clients are registered by name (`pc1` and `pc1.lan`), and the NAS itself resolves to `NAS_IP`. To add hosts with static IPs, add `[hostname]=IP` pairs to the `DNS_LOCAL_HOSTS` dictionary, for example `declare -A DNS_LOCAL_HOSTS=( [router]="$IP_GATEWAY" [printer]="192.168.0.20" )`; each host resolves by its short name and `hostname.DNS_DOMAIN`. Entries from the NAS `/etc/hosts` are also served after removing loopback entries (`127.x.x.x` and `::1`); re-run `sudo bash nas-setup.sh --dns` after changing that file. `systemd-resolved` is disabled and the NAS `/etc/resolv.conf` points to `127.0.0.1`. The configuration enables `log-queries=extra` and `log-dhcp`; allowed/blocked access lists show events from the last hour. The agent stores classified events in `/var/log/marcelinoServer/dnsmasq-access.jsonl`, with 5 MB rotation and three backups; the original journal can be viewed with `journalctl -u dnsmasq`.
 - **Ad, tracker, and malware blocking:** lists in `DNS_BLOCKLISTS` (default: StevenBlack, HaGeZi Pro, and HaGeZi TIF medium) are consolidated into `/var/lib/nas-dns/blocklist.hosts` by `/usr/local/sbin/update-dns-blocklist`, which runs during installation and weekly via `nas-dns-blocklist.timer`. Hosts and dnsmasq (`local=/domain/`) formats are supported.
 - **DHCP (`DHCP_ENABLE`):** range `DHCP_RANGE_START`–`DHCP_RANGE_END` with lease duration `DHCP_LEASE`; provides the gateway, the NAS as DNS, and, when NTP is active, the NAS as the time server. Disable the router's DHCP first to avoid two servers on the network.
 

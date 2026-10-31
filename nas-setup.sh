@@ -15,7 +15,6 @@ LAN_NETMASK="255.255.255.0"        # NAS local network mask
 LAN_CIDR=""                        # Local network in CIDR format; empty = calculated from LAN_NETMASK
 IP_RANGE_START="192.168.0.100"     # DHCP range start
 IP_RANGE_END="192.168.0.200"       # DHCP range end
-DNS_UPSTREAM=("1.1.1.1" "9.9.9.9") # External resolvers (Cloudflare and Quad9)
 LOCAL_DOMAIN="lan"                 # Local domain used for network and Samba configuration
 
 # --- Storage ---
@@ -81,11 +80,15 @@ NET_IFACE=""                       # Network interface. Empty = detect from the 
 NET_GATEWAY="$IP_GATEWAY"          # Internet gateway/router. Empty = use the current gateway
 
 # --- DNS (dnsmasq) with ad, tracker, and malware filtering ---
-DNS_ENABLE="yes"
-# Effective resolvers: DNS_UPSTREAM; if empty, use Cloudflare and Quad9
-DNS_UPSTREAM_int=("1.1.1.1" "9.9.9.9")
-[[ -z "${DNS_UPSTREAM[*]:-}" ]] || DNS_UPSTREAM_int=("${DNS_UPSTREAM[@]}")
+DNS_ENABLE="yes"                   # yes = enable DNS server with dnsmasq; no = disable it
+DNS_UPSTREAM=("1.1.1.1" "9.9.9.9") # External resolvers (Cloudflare and Quad9)
 DNS_DOMAIN="$LOCAL_DOMAIN"         # Local domain provided to clients
+DNS_CACHE_SIZE=10000               # Size of the DNS cache (number of entries)
+# Static local hosts: [hostname]=IP
+declare -A DNS_LOCAL_HOSTS=( 
+            [router]="$IP_GATEWAY"
+)
+
 # Lists in hosts or dnsmasq format (local=/domain/)
 DNS_BLOCKLISTS=(
   "https://raw.githubusercontent.com/StevenBlack/hosts/master/hosts"                    # Ads + malware
@@ -115,6 +118,10 @@ SPEEDTEST_ENABLE="yes"                                  # yes = install marcelin
 SPEEDTEST_LOG="/var/log/marcelinoSpeedtest.jsonl"             # Test log
 SPEEDTEST_OUT="$USER_HOME/internet_test"        # Charts saved in year/month subdirectories here
 SPEEDTEST_GRAPH_TIME="23:55"                             # Daily chart time (last 24 hours)
+
+# --- Iperf3 (network performance testing) ---
+IPERF3_ENABLE="yes"
+IPERF3_PORT=5201
 
 # --- Web dashboard (marcelinoWeb) ---
 WEB_ENABLE="yes"                                         # yes = install the dashboard with login
@@ -259,6 +266,9 @@ Serviços:
   --ntp / --uninstall-ntp
   --dns / --uninstall-dns       DNS e DHCP (dnsmasq)
   --speedtest / --uninstall-speedtest
+  --iperf3 / --uninstall-iperf3  Servidor de teste de velocidade da LAN
+  --start-iperf3 / --stop-iperf3 / --restart-iperf3
+  --enable-iperf3 / --disable-iperf3  Habilita/desabilita no boot, sem iniciar/parar
   --marcelino-server / --uninstall-marcelino-server
   --web / --uninstall-web
   --anytype / --uninstall-anytype
@@ -663,7 +673,7 @@ setup_network() {
     con=$(nmcli -g GENERAL.CONNECTION device show "$NET_IFACE")
     [[ -n "$con" ]] || die "Nenhuma conexão NetworkManager em $NET_IFACE."
     nmcli connection modify "$con" ipv4.method manual ipv4.addresses "$NAS_IP/$NAS_PREFIX" \
-      ipv4.gateway "$gw" ipv4.dns "127.0.0.1 ${DNS_UPSTREAM_int[*]}"
+      ipv4.gateway "$gw" ipv4.dns "127.0.0.1 ${DNS_UPSTREAM[*]}"
     nmcli connection up "$con" || warn "Falha ao reativar a conexão; reinicie o sistema."
   elif [[ -f /etc/network/interfaces ]]; then
     cp -n /etc/network/interfaces /etc/network/interfaces.orig || true
@@ -769,10 +779,13 @@ setup_dns() {
     echo "log-dhcp"
     # Prevent /etc/hosts (127.0.1.1) from being provided to clients as the NAS address
     echo "host-record=$(hostname),$(hostname).$DNS_DOMAIN,$NAS_IP"
-    local s
-    for s in "${DNS_UPSTREAM_int[@]}"; do echo "server=$s"; done
+    local s host
+    for s in "${DNS_UPSTREAM[@]}"; do echo "server=$s"; done
+    for host in "${!DNS_LOCAL_HOSTS[@]}"; do
+      echo "host-record=$host,$host.$DNS_DOMAIN,${DNS_LOCAL_HOSTS[$host]}"
+    done
     if [[ "$DNS_ENABLE" == "yes" ]]; then
-      echo "cache-size=10000"
+      echo "cache-size=$DNS_CACHE_SIZE"
       echo "addn-hosts=/var/lib/nas-dns/blocklist.hosts"
     else
       echo "port=0"
@@ -848,6 +861,40 @@ EOF
   systemctl enable chrony
   systemctl restart chrony
   firewall_allow udp 123 'NAS NTP'
+}
+
+setup_iperf3() {
+  [[ "$IPERF3_ENABLE" == "yes" ]] || return 0
+  [[ "$IPERF3_PORT" =~ ^[0-9]{1,5}$ ]] && (( 10#$IPERF3_PORT >= 1 && 10#$IPERF3_PORT <= 65535 )) \
+    || die "IPERF3_PORT deve estar entre 1 e 65535."
+  printf 'iperf3 iperf3/start_daemon boolean false\n' | debconf-set-selections
+  ensure_packages iperf3
+  systemctl disable --now iperf3.service 2>/dev/null || true
+  log "Configurando servidor iperf3 na porta $IPERF3_PORT..."
+  cat > /etc/systemd/system/iperf3.service <<EOF
+[Unit]
+Description=iperf3 LAN speed test server
+After=network.target
+
+[Service]
+Type=simple
+DynamicUser=yes
+ExecStart=/usr/bin/iperf3 --server --port $IPERF3_PORT
+Restart=on-failure
+RestartSec=3
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+
+[Install]
+WantedBy=multi-user.target
+EOF
+  systemctl daemon-reload
+  firewall_allow tcp "$IPERF3_PORT" 'NAS iperf3'
+  firewall_allow udp "$IPERF3_PORT" 'NAS iperf3'
+  systemctl enable --now iperf3.service
+  log "Teste em outro computador: iperf3 -c $NAS_IP -p $IPERF3_PORT"
 }
 
 setup_speedtest() {
@@ -1280,6 +1327,15 @@ uninstall_dns() {
   systemctl daemon-reload
 }
 
+uninstall_iperf3() {
+  systemctl disable --now iperf3.service 2>/dev/null || true
+  rm -f /etc/systemd/system/iperf3.service
+  firewall_delete tcp "$IPERF3_PORT"
+  firewall_delete udp "$IPERF3_PORT"
+  purge_packages iperf3
+  systemctl daemon-reload
+}
+
 uninstall_speedtest() {
   systemctl disable --now marcelinoSpeedtest.timer marcelinoSpeedtest-graph.timer 2>/dev/null || true
   rm -f /etc/systemd/system/marcelinoSpeedtest.service \
@@ -1389,6 +1445,12 @@ while [[ $# -gt 0 ]]; do
     --ntp)       SELECTED_STEPS+=(ntp) ;;
     --dns)       SELECTED_STEPS+=(dns) ;;
     --speedtest) SELECTED_STEPS+=(speedtest) ;;
+    --iperf3|--install-iperf3) SELECTED_STEPS+=(iperf3) ;;
+    --start-iperf3) SELECTED_STEPS+=(start_iperf3) ;;
+    --stop-iperf3) SELECTED_STEPS+=(stop_iperf3) ;;
+    --restart-iperf3) SELECTED_STEPS+=(restart_iperf3) ;;
+    --enable-iperf3) SELECTED_STEPS+=(enable_iperf3) ;;
+    --disable-iperf3) SELECTED_STEPS+=(disable_iperf3) ;;
     --marcelino-server) SELECTED_STEPS+=(marcelino_server) ;;
     --web)       SELECTED_STEPS+=(web) ;;
     --anytype)   SELECTED_STEPS+=(anytype) ;;
@@ -1400,6 +1462,7 @@ while [[ $# -gt 0 ]]; do
     --uninstall-ntp|--unistall-ntp) SELECTED_STEPS+=(uninstall_ntp); HAS_UNINSTALL="yes" ;;
     --uninstall-dns|--unistall-dns) SELECTED_STEPS+=(uninstall_dns); HAS_UNINSTALL="yes" ;;
     --uninstall-speedtest|--unistall-speedtest) SELECTED_STEPS+=(uninstall_speedtest); HAS_UNINSTALL="yes" ;;
+    --uninstall-iperf3|--unistall-iperf3) SELECTED_STEPS+=(uninstall_iperf3); HAS_UNINSTALL="yes" ;;
     --uninstall-marcelino-server|--unistall-marcelino-server) SELECTED_STEPS+=(uninstall_marcelino_server); HAS_UNINSTALL="yes" ;;
     --uninstall-web|--unistall-web) SELECTED_STEPS+=(uninstall_web); HAS_UNINSTALL="yes" ;;
     --uninstall-anytype|--unistall-anytype) SELECTED_STEPS+=(uninstall_anytype); HAS_UNINSTALL="yes" ;;
@@ -1428,7 +1491,7 @@ NEEDS_LAN="no"
 for step in "${SELECTED_STEPS[@]}"; do
   case "$step" in
     marcelino_server|uninstall_marcelino_server) ;;
-    samba|discovery|ntp|dns|speedtest|web|anytype|syncthing|ssh|dlna|uninstall_*) NEEDS_LAN="yes" ;;
+    samba|discovery|ntp|dns|speedtest|iperf3|web|anytype|syncthing|ssh|dlna|uninstall_*) NEEDS_LAN="yes" ;;
   esac
 done
 [[ "$RUN_ALL" != "yes" ]] || NEEDS_LAN="yes"
@@ -1438,13 +1501,14 @@ if [[ "$NEEDS_LAN" == "yes" ]]; then
 fi
 
 if [[ "$RUN_ALL" == "yes" ]]; then
-  SELECTED_STEPS=(network raid storage user ssh samba discovery ntp dns speedtest marcelino_server web anytype syncthing dlna)
+  SELECTED_STEPS=(network raid storage user ssh samba discovery ntp dns speedtest iperf3 marcelino_server web anytype syncthing dlna)
 fi
 
 # Run in canonical order, regardless of the argument order
 ORDERED_STEPS=()
-for s in network raid storage user ssh samba discovery ntp dns speedtest marcelino_server web anytype syncthing dlna \
-  uninstall_samba uninstall_discovery uninstall_ntp uninstall_dns uninstall_speedtest \
+for s in network raid storage user ssh samba discovery ntp dns speedtest iperf3 marcelino_server web anytype syncthing dlna \
+  start_iperf3 stop_iperf3 restart_iperf3 enable_iperf3 disable_iperf3 \
+  uninstall_samba uninstall_discovery uninstall_ntp uninstall_dns uninstall_speedtest uninstall_iperf3 \
   uninstall_marcelino_server uninstall_web uninstall_anytype uninstall_syncthing uninstall_ssh uninstall_dlna; do
   for step in "${SELECTED_STEPS[@]}"; do
     [[ "$step" == "$s" ]] && ORDERED_STEPS+=("$s")
@@ -1456,6 +1520,7 @@ for step in "${SELECTED_STEPS[@]}"; do
   case "$step" in
     samba|discovery|ssh) ;;
     ntp)     [[ "$NTP_ENABLE" == "yes" ]] || continue ;;
+    iperf3)  [[ "$IPERF3_ENABLE" == "yes" ]] || continue ;;
     dns)     [[ "$DNS_ENABLE" == "yes" || "$DHCP_ENABLE" == "yes" ]] || continue ;;
     web)     [[ "$WEB_ENABLE" == "yes" ]] || continue ;;
     anytype) [[ "$ANYTYPE_ENABLE" == "yes" ]] || continue ;;
@@ -1478,6 +1543,12 @@ for step in "${SELECTED_STEPS[@]}"; do
     ntp)       setup_ntp ;;
     dns)       setup_dns ;;
     speedtest) setup_speedtest ;;
+    iperf3)    setup_iperf3 ;;
+    start_iperf3)   systemctl start iperf3.service ;;
+    stop_iperf3)    systemctl stop iperf3.service ;;
+    restart_iperf3) systemctl restart iperf3.service ;;
+    enable_iperf3)  systemctl enable iperf3.service ;;
+    disable_iperf3) systemctl disable iperf3.service ;;
     marcelino_server) setup_marcelino_server ;;
     web)       setup_web ;;
     anytype)   setup_anytype ;;
@@ -1489,6 +1560,7 @@ for step in "${SELECTED_STEPS[@]}"; do
     uninstall_ntp)      uninstall_ntp ;;
     uninstall_dns)      uninstall_dns ;;
     uninstall_speedtest) uninstall_speedtest ;;
+    uninstall_iperf3) uninstall_iperf3 ;;
     uninstall_marcelino_server) uninstall_marcelino_server ;;
     uninstall_web)       uninstall_web ;;
     uninstall_anytype)   uninstall_anytype ;;

@@ -40,13 +40,16 @@ Cada opção de serviço instala suas dependências, configura o serviço e abre
 | `--ntp` / `--uninstall-ntp` | Configura/remove chrony como servidor de horário da LAN, com a porta NTP. |
 | `--dns` / `--uninstall-dns` | Configura/remove dnsmasq para DNS e DHCP da LAN (veja abaixo), com restauração do backup de `resolv.conf`. |
 | `--speedtest` / `--uninstall-speedtest` | Instala/remove o comando e os timers de teste/gráfico; logs e gráficos existentes são preservados. |
+| `--iperf3` / `--uninstall-iperf3` | Instala/remove o servidor iperf3 para testes de velocidade da LAN, seu serviço systemd e as regras TCP/UDP do firewall. |
+| `--start-iperf3` / `--stop-iperf3` / `--restart-iperf3` | Inicia, para ou reinicia o servidor iperf3 instalado. |
+| `--enable-iperf3` / `--disable-iperf3` | Habilita/desabilita o iperf3 no boot, sem iniciar/parar o serviço em execução. |
 | `--marcelino-server` / `--uninstall-marcelino-server` | Instala/remove o agente de métricas, sem abrir portas; configuração e JSON existentes são preservados na remoção. |
 | `--web` / `--uninstall-web` | Instala/remove o dashboard e sua regra de firewall; usuários, certificados e configuração persistente são preservados. |
 | `--anytype` / `--uninstall-anytype` | Configura/remove o serviço Anytype em Docker e seu timer de backup diário; dados e backups são preservados e Docker só é desabilitado/removido se não houver outros contêineres ativos. |
 | `--syncthing` / `--uninstall-syncthing` | Instala/remove Syncthing como serviço do usuário principal, com portas de sincronização na LAN; configuração, identidade e pastas sincronizadas são preservadas. |
 | `--ssh` / `--uninstall-ssh` | Instala/configura ou remove o servidor SSH, configurações gerenciadas e regra da porta `SSH_PORT`. A desinstalação encerra o acesso SSH remoto. |
 | `--dlna` / `--uninstall-dlna` | Instala/remove MiniDLNA e abre/fecha SSDP e a porta `DLNA_PORT`; mídia, banco/cache e logs são preservados. |
-| `--all` | Configura rede, RAID, armazenamento, usuário e todos os serviços, incluindo SSH, Syncthing e DLNA. Não executa desinstalações. |
+| `--all` | Configura rede, RAID, armazenamento, usuário e todos os serviços, incluindo SSH, iperf3, Syncthing e DLNA. Não executa desinstalações. |
 
 As opções de desinstalação aceitam também a grafia `--unistall-*` por compatibilidade. Não há opção para desinstalar RAID ou armazenamento: nenhuma opção de remoção apaga partições, altera LUKS, desmonta volumes ou desativa arrays RAID. O firewall não é redefinido; somente as regras da etapa selecionada são alteradas.
 
@@ -110,6 +113,40 @@ Para remover, execute `sudo bash nas-setup.sh --uninstall-syncthing`. O serviço
 
 `--dlna` instala MiniDLNA e exige que o volume de armazenamento já esteja montado. Ajuste `DLNA_ENABLE`, `DLNA_PORT`, `DLNA_MEDIA_MUSIC`, `DLNA_MEDIA_VIDEO`, `DLNA_MEDIA_PICTURES`, `DLNA_CACHE` e `DLNA_LOG` no início de `nas-setup.sh`. A regra do UFW é criada junto com o serviço; para remover MiniDLNA e fechar as portas, execute `sudo bash nas-setup.sh --uninstall-dlna` (ou `--unistall-dlna`). A remoção mantém as mídias, o banco/cache e os logs.
 
+### Teste de velocidade da LAN (iperf3)
+
+Diferentemente de `--speedtest`, que testa a conexão com a internet, `--iperf3` mede a taxa de transferência entre outro computador e o NAS. Instala o pacote Debian `iperf3` e cria `/etc/systemd/system/iperf3.service`, executado em modo servidor com usuário dinâmico, sem privilégios de root. A instalação inicia o servidor imediatamente e habilita sua inicialização no boot.
+
+Ajuste `IPERF3_ENABLE` (padrão `yes`) e `IPERF3_PORT` (padrão `5201`, intervalo válido de 1 a 65535) no início de `nas-setup.sh`. A configuração `--all` inclui essa etapa. Definir `IPERF3_ENABLE=no` pula instalações futuras, inclusive com `--all`; não para nem desabilita um serviço existente.
+
+```bash
+sudo bash nas-setup.sh --iperf3                 # alias: --install-iperf3
+sudo bash nas-setup.sh --start-iperf3
+sudo bash nas-setup.sh --stop-iperf3
+sudo bash nas-setup.sh --restart-iperf3
+sudo bash nas-setup.sh --enable-iperf3          # habilita somente no boot
+sudo bash nas-setup.sh --disable-iperf3         # desabilita somente no boot
+```
+
+Esses controles usam `systemctl` sobre `iperf3.service`; não reinstalam pacotes nem alteram o firewall. Para parar o servidor agora e impedir sua inicialização no boot, combine `--stop-iperf3 --disable-iperf3`. Consulte o estado e os logs com:
+
+```bash
+sudo systemctl status iperf3.service
+sudo journalctl -u iperf3.service -n 50 --no-pager
+```
+
+O UFW libera somente para `LAN_CIDR` o acesso a `IPERF3_PORT` por TCP e UDP. Não é necessário encaminhar portas no roteador. Instale o iperf3 em outro computador da LAN e execute os comandos abaixo nele, substituindo IP e porta se necessário:
+
+```bash
+iperf3 -c 192.168.0.1 -p 5201                  # TCP: computador -> NAS
+iperf3 -c 192.168.0.1 -p 5201 -R               # TCP: NAS -> computador
+iperf3 -c 192.168.0.1 -p 5201 -u -b 100M       # UDP: alvo de 100 Mbit/s
+```
+
+Os testes consomem capacidade da rede e podem afetar outras transferências. Diferentemente da ferramenta de teste da internet, esse serviço não agenda testes nem gera histórico JSONL ou gráficos.
+
+Para remover o servidor, execute `sudo bash nas-setup.sh --uninstall-iperf3` (alias `--unistall-iperf3`). A remoção para e desabilita o serviço, remove sua unidade e o pacote e exclui as regras TCP/UDP. Mantenha `IPERF3_PORT` e `LAN_CIDR` com os valores usados na instalação ao remover, para que as regras correspondentes sejam excluídas.
+
 ### Teste de velocidade da internet
 
 A etapa `--speedtest` (`SPEEDTEST_ENABLE`) instala `speedtest-cli` e `python3-matplotlib`, copia `marcelinoSpeedtest.py` para `/usr/local/bin/marcelinoSpeedtest` e ativa dois timers:
@@ -168,7 +205,7 @@ Os PNG são nomeados `speedtest_AAAA-MM-DD_<periodo>.png` (por exemplo `speedtes
 ### IP estático, DNS e DHCP
 
 - **IP estático (`--network`):** controlado por `NET_STATIC`, `NAS_IP`, `NAS_PREFIX`, `NET_IFACE` e `NET_GATEWAY`. Interface e gateway vazios são detectados pela rota padrão. Se `LAN_CIDR` estiver vazio, é derivado de `NAS_IP/NAS_PREFIX`.
-- **DNS (`--dns`, `DNS_ENABLE`):** dnsmasq com cache, resolvedores externos em `DNS_UPSTREAM` e domínio local `DNS_DOMAIN`. Clientes DHCP são registrados por nome (`pc1` e `pc1.lan`) e o próprio NAS responde pelo `NAS_IP`. Máquinas com IP fixo precisam de entrada no `/etc/hosts` do NAS ou de `dhcp-host=` em `/etc/dnsmasq.d/nas.conf`; o script mantém uma cópia filtrada em `/var/lib/nas-dns/hosts`, removendo entradas loopback (`127.x.x.x` e `::1`) antes de servi-las na LAN. Reexecute `sudo bash nas-setup.sh --dns` após alterar `/etc/hosts`. O `systemd-resolved` é desativado e o `/etc/resolv.conf` do NAS aponta para `127.0.0.1`. A configuração ativa `log-queries=extra` e `log-dhcp`; as listas de acessos liberados/bloqueados exibem os últimos eventos da última hora. O agente guarda os eventos classificados em `/var/log/marcelinoServer/dnsmasq-access.jsonl`, com rotação de 5 MB e três cópias, e o journal original pode ser consultado com `journalctl -u dnsmasq`.
+- **DNS (`--dns`, `DNS_ENABLE`):** dnsmasq com cache, resolvedores externos em `DNS_UPSTREAM` e domínio local `DNS_DOMAIN`. Clientes DHCP são registrados por nome (`pc1` e `pc1.lan`) e o próprio NAS responde pelo `NAS_IP`. Para cadastrar máquinas com IP fixo, acrescente pares `[hostname]=IP` ao dicionário `DNS_LOCAL_HOSTS`, por exemplo `declare -A DNS_LOCAL_HOSTS=( [router]="$IP_GATEWAY" [impressora]="192.168.0.20" )`; cada host responderá pelo nome curto e por `hostname.DNS_DOMAIN`. Alternativamente, entradas de `/etc/hosts` também são servidas após remover endereços loopback (`127.x.x.x` e `::1`); reexecute `sudo bash nas-setup.sh --dns` após alterá-las. O `systemd-resolved` é desativado e o `/etc/resolv.conf` do NAS aponta para `127.0.0.1`. A configuração ativa `log-queries=extra` e `log-dhcp`; as listas de acessos liberados/bloqueados exibem os últimos eventos da última hora. O agente guarda os eventos classificados em `/var/log/marcelinoServer/dnsmasq-access.jsonl`, com rotação de 5 MB e três cópias, e o journal original pode ser consultado com `journalctl -u dnsmasq`.
 - **Bloqueio de anúncios, rastreadores e malware:** as listas em `DNS_BLOCKLISTS` (padrão: StevenBlack, HaGeZi Pro e HaGeZi TIF medium) são consolidadas em `/var/lib/nas-dns/blocklist.hosts` por `/usr/local/sbin/update-dns-blocklist`, executado na instalação e semanalmente pelo timer `nas-dns-blocklist.timer`. São aceitos os formatos hosts e dnsmasq (`local=/dominio/`).
 - **DHCP (`DHCP_ENABLE`):** faixa `DHCP_RANGE_START`–`DHCP_RANGE_END` com concessão `DHCP_LEASE`; entrega gateway, o NAS como DNS e, com NTP ativo, o NAS como servidor de horário. Desative o DHCP do roteador antes para evitar dois servidores na rede.
 
