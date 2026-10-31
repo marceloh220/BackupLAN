@@ -9,7 +9,7 @@ An alternative cross-platform .NET version of Marcelino Client is available for 
 
 | Component | File | Purpose |
 |---|---|---|
-| NAS setup | `nas-setup.sh` | Configures a static IP, storage, Samba, network discovery, NTP, DNS/DHCP with ad/tracker blocking, and a firewall. |
+| NAS setup | `nas-setup.sh` | Configures a static IP, storage, Samba, network discovery, NTP, DNS/DHCP with ad/tracker blocking, GitHub repository backups, and a firewall. |
 | Speed test | `marcelinoSpeedtest.py` | Measures download, upload, and ping; logs results as JSONL, lists tests, and generates charts. |
 | Statistics agent | `marcelinoServer.py` | Publishes server metrics, RAID array status, and Samba share rules as JSON. |
 | systemd service | `marcelinoServer.service` | Runs the agent after system startup. |
@@ -48,7 +48,8 @@ Each service option installs its dependencies, configures the service, and opens
 | `--syncthing` / `--uninstall-syncthing` | Installs/removes Syncthing as the primary user's service, with LAN synchronization ports; configuration, identity, and synced folders are preserved. |
 | `--ssh` / `--uninstall-ssh` | Installs/configures or removes the SSH server, managed settings, and the `SSH_PORT` rule. Uninstalling ends remote SSH access. |
 | `--dlna` / `--uninstall-dlna` | Installs/removes MiniDLNA and opens/closes SSDP and the `DLNA_PORT`; media, database/cache, and logs are preserved. |
-| `--all` | Configures networking, RAID, storage, the user, and all services, including SSH, iperf3, Syncthing, and DLNA. It does not uninstall anything. |
+| `--git` | Configures a daily GitHub repository backup from `GIT_REPO` to `GIT_BACKUP`. Requires the primary user, mounted storage, and a readable token file. |
+| `--all` | Configures networking, RAID, storage, the user, and all services, including SSH, iperf3, Syncthing, and DLNA. Git backup is excluded unless `--git` is explicitly added. It does not uninstall anything. |
 
 Uninstall options also accept the misspelled `--unistall-*` form for compatibility. There is no RAID or storage uninstall option: no removal option deletes partitions, changes LUKS, unmounts volumes, or disables RAID arrays. The firewall is not reset; only rules for the selected step are changed.
 
@@ -58,9 +59,11 @@ Options are edited in the **CONFIGURATION** section at the top of the script. Th
 - Configurable filesystem in `RAID_FILESYSTEM`: `ext4` (default), `xfs`, or `btrfs`.
 - Volume at `/srv/nas`; LUKS enabled on `/dev/md0`, with the `nas_crypt` mapping, keyfile `/etc/nas.key`, and automatic unlocking.
 - Applications in `APP_STORAGE` (default `/srv/app`): Monitor, Anytype, Syncthing configuration, and DLNA database/cache. This path is not automatically on the RAID or inside LUKS; configure a separate mount or use a path inside the volume if you need that protection.
-- Shares `Publico`, `Privado`, `Backup`, `Midia`, `Monitor`, and the primary user's share (`USER_NAME` with its first letter capitalized).
+- Git backup: `GIT_APP` stores the backup script; `GIT_REPO` stores cloned repositories and `GIT_BACKUP` is their mirror destination. Both repository paths should be on mounted storage.
+- Shares `Publico`, `Privado`, `Backup`, `Midia`, `Monitor`, `Anytype`, and the primary user's share (`USER_NAME` with its first letter capitalized).
 - `Publico` allows guests; `Backup` and `Midia` use the `nasgroup` group; `Privado` and the user's share are restricted to `USER_NAME`.
-- Primary user: `USER_NAME` and `USER_PASSWORD` (replace `sua_senha_aqui`; at least 8 characters for new accounts). If `USER_PASSWORD=""`, the password is prompted for interactively in the terminal, without echoing typed characters, when needed to create accounts or configure web login. For non-interactive runs, set the variable beforehand. Existing Linux and Samba accounts keep their passwords; if both accounts already exist, the user step does not require a new password. The dashboard uses `USER_PASSWORD` separately for web login. If entered in the script, the password is stored in plain text; restrict access to the file.
+- `Anytype` is also restricted to `USER_NAME`.
+- Primary user: `USER_NAME` and `USER_PASSWORD` (set a password of at least 8 characters for new accounts). If `USER_PASSWORD=""`, the password is prompted for interactively in the terminal, without echoing typed characters, when needed to create accounts or configure web login. For non-interactive runs, set the variable beforehand. Existing Linux and Samba accounts keep their passwords; if both accounts already exist, the user step does not require a new password. The dashboard uses `USER_PASSWORD` separately for web login. If entered in the script, the password is stored in plain text; restrict access to the file.
 - Workgroup `WORKGROUP`, domain `lan` (`LOCAL_DOMAIN`), SSH on port 22, and chrony enabled.
 - Network: `IP_INET`, `IP_GATEWAY`, `IP_RANGE_START`, `IP_RANGE_END`, `DNS_UPSTREAM`, and `LOCAL_DOMAIN` are set near the top of the script and supply `NAS_IP`, `NET_GATEWAY`, the DHCP range, and the domain. Adjust them for your network (the NAS, gateway, and DHCP range must be on the same subnet).
 
@@ -112,6 +115,21 @@ To remove it, run `sudo bash nas-setup.sh --uninstall-syncthing`. The service, p
 
 `--dlna` installs MiniDLNA and requires the storage volume to be mounted first. Adjust `DLNA_ENABLE`, `DLNA_PORT`, `DLNA_MEDIA_MUSIC`, `DLNA_MEDIA_VIDEO`, `DLNA_MEDIA_PICTURES`, `DLNA_CACHE`, and `DLNA_LOG` at the top of `nas-setup.sh`. The UFW rule is created with the service; to remove MiniDLNA and close the ports, run `sudo bash nas-setup.sh --uninstall-dlna` (or `--unistall-dlna`). Removal preserves media, the database/cache, and logs.
 
+### GitHub repository backup
+
+`--git` installs `git`, GitHub CLI, and `rsync`, then enables `git-backup.timer`. It runs daily at midnight in the system's local time zone. With `Persistent=true`, a run missed while the timer was inactive is started when the timer becomes active again. The primary account (`USER_NAME`) must already exist, and the NAS storage volume must be mounted. Set `GIT_USERNAME`, `GIT_NAME`, `GIT_EMAIL`, `GIT_APP`, `GIT_REPO`, `GIT_BACKUP`, `GIT_LOG`, and `GIT_TOKEN_FILE` in the configuration section. The token file must contain a GitHub token with permission to list and read the repositories and must be readable by `USER_NAME` (use restrictive file permissions).
+
+Each run clones or fast-forward updates the repositories owned by `GIT_USERNAME` in `GIT_REPO`, then mirrors that directory to `GIT_BACKUP`. The mirror uses `rsync --delete`, so files removed from `GIT_REPO` are also removed from `GIT_BACKUP`; keep unrelated files out of the backup destination. Standard output and errors are appended to `GIT_LOG` (default `/srv/app/git/git_backup.log`), including timestamped start and completion/failure messages and the Git/rsync command output. The log is owned by `USER_NAME` and has mode `0640`. It is not rotated or automatically deleted, so monitor its size and configure log rotation if needed.
+
+```bash
+sudo bash nas-setup.sh --git
+sudo systemctl start git-backup.service       # run a backup now
+systemctl list-timers --all git-backup.timer  # schedule and next run
+tail -n 50 /srv/app/git/git_backup.log        # recent backup output (GIT_LOG)
+```
+
+`--all` does not configure Git backup. Use `--all --git` only when you explicitly want to run both.
+
 ### LAN speed test (iperf3)
 
 Unlike `--speedtest`, which tests the internet connection, `--iperf3` measures throughput between another computer and the NAS. It installs the Debian `iperf3` package and creates `/etc/systemd/system/iperf3.service`, running in server mode as a dynamic, unprivileged user. Installation starts the server immediately and enables it at boot.
@@ -151,7 +169,7 @@ To remove the server, run `sudo bash nas-setup.sh --uninstall-iperf3` (alias `--
 The `--speedtest` step (`SPEEDTEST_ENABLE`) installs `speedtest-cli` and `python3-matplotlib`, copies `marcelinoSpeedtest.py` to `/usr/local/bin/marcelinoSpeedtest`, and enables two timers:
 
 - `marcelinoSpeedtest.timer`: runs a test every hour and writes it to `SPEEDTEST_LOG` (default `/var/log/marcelinoSpeedtest.jsonl`).
-- `marcelinoSpeedtest-graph.timer`: generates a chart of the last 24 hours every day at `SPEEDTEST_GRAPH_TIME` (23:55) in `SPEEDTEST_OUT/YEAR/MONTH/` (default `/srv/marcelo/internet_test`); the folder is selected based on the chart date.
+- `marcelinoSpeedtest-graph.timer`: generates a chart of the last 24 hours every day at `SPEEDTEST_GRAPH_TIME` (23:55) in `SPEEDTEST_OUT/YEAR/MONTH/` (default `/srv/nas/meneceu/internet_test`, from `USER_HOME`); the folder is selected based on the chart date.
 
 When upgrading an existing installation, the previous `nas-speedtest` timers and log are not migrated automatically. Disable the old timers with `sudo systemctl disable --now nas-speedtest.timer nas-speedtest-graph.timer`; the previous log at `/var/log/nas-speedtest.jsonl` remains separate and is not included in the new dashboard history.
 
@@ -204,7 +222,7 @@ PNG files are named `speedtest_YYYY-MM-DD_<period>.png` (for example, `speedtest
 ### Static IP, DNS, and DHCP
 
 - **Static IP (`--network`):** controlled by `NET_STATIC`, `NAS_IP`, `NAS_PREFIX`, `NET_IFACE`, and `NET_GATEWAY`. Empty interface and gateway values are detected from the default route. If `LAN_CIDR` is empty, it is derived from `NAS_IP/NAS_PREFIX`.
-- **DNS (`--dns`, `DNS_ENABLE`):** dnsmasq with caching, external resolvers in `DNS_UPSTREAM`, and local domain `DNS_DOMAIN`. DHCP clients are registered by name (`pc1` and `pc1.lan`), and the NAS itself resolves to `NAS_IP`. To add hosts with static IPs, add `[hostname]=IP` pairs to the `DNS_LOCAL_HOSTS` dictionary, for example `declare -A DNS_LOCAL_HOSTS=( [router]="$IP_GATEWAY" [printer]="192.168.0.20" )`; each host resolves by its short name and `hostname.DNS_DOMAIN`. Entries from the NAS `/etc/hosts` are also served after removing loopback entries (`127.x.x.x` and `::1`); re-run `sudo bash nas-setup.sh --dns` after changing that file. `systemd-resolved` is disabled and the NAS `/etc/resolv.conf` points to `127.0.0.1`. The configuration enables `log-queries=extra` and `log-dhcp`; allowed/blocked access lists show events from the last hour. The agent stores classified events in `/var/log/marcelinoServer/dnsmasq-access.jsonl`, with 5 MB rotation and three backups; the original journal can be viewed with `journalctl -u dnsmasq`.
+- **DNS (`--dns`, `DNS_ENABLE`):** dnsmasq with caching, external resolvers in `DNS_UPSTREAM`, and local domain `DNS_DOMAIN`. DHCP clients are registered by name (`pc1` and `pc1.lan`), and the NAS itself resolves to `NAS_IP`. Add static hosts as `[hostname]="IP"` entries in `DNS_STATIC_LOCAL_HOSTS`, for example `declare -A DNS_STATIC_LOCAL_HOSTS=( [router]="$IP_GATEWAY" [printer]="192.168.0.20" )`; each host resolves by its short name and `hostname.DNS_DOMAIN`. Entries from the NAS `/etc/hosts` are also served after removing loopback entries (`127.x.x.x` and `::1`); re-run `sudo bash nas-setup.sh --dns` after changing that file. `systemd-resolved` is disabled and the NAS `/etc/resolv.conf` points to `127.0.0.1`. The configuration enables `log-queries=extra` and `log-dhcp`; allowed/blocked access lists show events from the last hour. The agent stores classified events in `/var/log/marcelinoServer/dnsmasq-access.jsonl`, with 5 MB rotation and three backups; the original journal can be viewed with `journalctl -u dnsmasq`.
 - **Ad, tracker, and malware blocking:** lists in `DNS_BLOCKLISTS` (default: StevenBlack, HaGeZi Pro, and HaGeZi TIF medium) are consolidated into `/var/lib/nas-dns/blocklist.hosts` by `/usr/local/sbin/update-dns-blocklist`, which runs during installation and weekly via `nas-dns-blocklist.timer`. Hosts and dnsmasq (`local=/domain/`) formats are supported.
 - **DHCP (`DHCP_ENABLE`):** range `DHCP_RANGE_START`–`DHCP_RANGE_END` with lease duration `DHCP_LEASE`; provides the gateway, the NAS as DNS, and, when NTP is active, the NAS as the time server. Disable the router's DHCP first to avoid two servers on the network.
 

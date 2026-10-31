@@ -64,9 +64,11 @@ SHARES=(
 PUBLIC_SHARES=("Publico")                          # Share names accessible without a password (guest)
 GROUP_SHARES=("Backup" "Midia")                    # Shares accessible to the SAMBA_GROUP group
 READONLY_SHARES=("Monitor")                        # Visible, read-only shares (written locally by marcelinoServer)
-USER_SHARES=("${USER_NAME^}:$USER_NAME" 
+USER_SHARES=(
+             "${USER_NAME^}:$USER_NAME"
              "Privado:$USER_NAME" 
-             "Anytype:$USER_NAME")                 # share:user pairs accessible only to that user
+             "Anytype:$USER_NAME"
+            )                 # share:user pairs accessible only to that user
 SAMBA_USER="$USER_NAME"                            # Samba user (created if it does not exist)
 SAMBA_GROUP="nasgroup"                             # Samba group (created if it does not exist)
 WORKGROUP="WORKGROUP"                              # Samba workgroup
@@ -84,10 +86,9 @@ DNS_ENABLE="yes"                   # yes = enable DNS server with dnsmasq; no = 
 DNS_UPSTREAM=("1.1.1.1" "9.9.9.9") # External resolvers (Cloudflare and Quad9)
 DNS_DOMAIN="$LOCAL_DOMAIN"         # Local domain provided to clients
 DNS_CACHE_SIZE=10000               # Size of the DNS cache (number of entries)
-# Static local hosts: [hostname]=IP
-declare -A DNS_LOCAL_HOSTS=( 
-            [router]="$IP_GATEWAY"
-)
+declare -A DNS_STATIC_LOCAL_HOSTS=(
+  [router]="$IP_GATEWAY"
+)                                        # Static local hosts: [hostname]=IP
 
 # Lists in hosts or dnsmasq format (local=/domain/)
 DNS_BLOCKLISTS=(
@@ -152,6 +153,16 @@ DLNA_MEDIA_PICTURES="$DLNA_MEDIA_DIR/Pictures"
 DLNA_CACHE="$APP_STORAGE/dlna/.dlna.cache"
 DLNA_DB="$APP_STORAGE/dlna/.dlna.db"
 DLNA_LOG="/var/log/minidlna/minidlna.log"
+
+# --- Git configuration ---
+GIT_APP="$APP_STORAGE/git"                  # Git application storage
+GIT_REPO="$USER_HOME/git"                   # Local Git repository storage
+GIT_BACKUP="$NAS_STORAGE/backup/git"        # Git repository backups
+GIT_LOG="$APP_STORAGE/git/git_backup.log"   # Git backup log
+GIT_NAME="Meneceu Little Lion"              # Git user name for commits
+GIT_EMAIL="meneceu@example.com"             # Git user email for commits
+GIT_USERNAME="meneceuOLED"                  # Git username for authentication
+GIT_TOKEN_FILE="/etc/nas-setup/github.token" # GitHub token file, readable by USER_NAME
 
 ###############################################################################
 # FUNCTIONS
@@ -275,6 +286,7 @@ Serviços:
   --syncthing / --uninstall-syncthing
   --ssh / --uninstall-ssh
   --dlna / --uninstall-dlna
+  --git                         Configura backup diário dos repositórios GitHub
   -h, --help                    Mostra esta ajuda
 
 Cada serviço instala suas dependências e configura suas regras do firewall.
@@ -781,8 +793,8 @@ setup_dns() {
     echo "host-record=$(hostname),$(hostname).$DNS_DOMAIN,$NAS_IP"
     local s host
     for s in "${DNS_UPSTREAM[@]}"; do echo "server=$s"; done
-    for host in "${!DNS_LOCAL_HOSTS[@]}"; do
-      echo "host-record=$host,$host.$DNS_DOMAIN,${DNS_LOCAL_HOSTS[$host]}"
+    for host in "${!DNS_STATIC_LOCAL_HOSTS[@]}"; do
+      echo "host-record=$host,$host.$DNS_DOMAIN,${DNS_STATIC_LOCAL_HOSTS[$host]}"
     done
     if [[ "$DNS_ENABLE" == "yes" ]]; then
       echo "cache-size=$DNS_CACHE_SIZE"
@@ -1262,6 +1274,138 @@ EOF
   firewall_allow tcp "$DLNA_PORT" 'NAS DLNA HTTP'
 }
 
+configure_git() {
+  local git_group storage_mountpoint repo_path backup_path
+  local -a config_paths=("$GIT_APP" "$GIT_REPO" "$GIT_BACKUP" "$GIT_LOG" "$GIT_TOKEN_FILE")
+  local path
+
+  for path in "${config_paths[@]}"; do
+    [[ "$path" == /* && "$path" != *[[:space:]]* && "$path" != *\"* \
+      && "$path" != *\\* && "$path" != *%* ]] \
+      || die "Caminhos Git devem ser absolutos e não conter espaços, aspas, barras invertidas ou %: $path"
+  done
+  [[ "$GIT_USERNAME" =~ ^[A-Za-z0-9-]{1,39}$ ]] || die "GIT_USERNAME inválido."
+  [[ -n "$GIT_NAME" && -n "$GIT_EMAIL" ]] || die "Defina GIT_NAME e GIT_EMAIL."
+  id "$USER_NAME" >/dev/null 2>&1 || die "Crie primeiro o usuário principal com --user."
+
+  storage_mountpoint="$RAID_MOUNTPOINT"
+  [[ -z "$CRYPT_DEVICE" ]] || storage_mountpoint="$CRYPT_MOUNTPOINT"
+  mountpoint -q "$storage_mountpoint" \
+    || die "Armazenamento não montado em $storage_mountpoint; monte-o antes de configurar Git."
+
+  repo_path="$(realpath -m -- "$GIT_REPO")"
+  backup_path="$(realpath -m -- "$GIT_BACKUP")"
+  [[ "$repo_path" != "$backup_path" && "$repo_path/" != "$backup_path/"* \
+    && "$backup_path/" != "$repo_path/"* ]] \
+    || die "GIT_REPO e GIT_BACKUP devem ser diretórios distintos e não sobrepostos."
+  [[ -f "$GIT_TOKEN_FILE" ]] || die "Arquivo de token não encontrado: $GIT_TOKEN_FILE"
+
+  ensure_packages git gh rsync
+  git_group="$(id -gn "$USER_NAME")"
+  runuser -u "$USER_NAME" -- test -r "$GIT_TOKEN_FILE" \
+    || die "O usuário $USER_NAME precisa ter leitura de $GIT_TOKEN_FILE."
+  install -d -o root -g root -m 0755 "$GIT_APP"
+  install -d -o "$USER_NAME" -g "$git_group" -m 0750 "$GIT_REPO" "$GIT_BACKUP"
+  touch "$GIT_LOG"
+  chown "$USER_NAME:$git_group" "$GIT_LOG"
+  chmod 0640 "$GIT_LOG"
+  runuser -u "$USER_NAME" -- env HOME="$USER_HOME" git config --global user.name "$GIT_NAME"
+  runuser -u "$USER_NAME" -- env HOME="$USER_HOME" git config --global user.email "$GIT_EMAIL"
+
+  cat > "$GIT_APP/git_backup.sh" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+
+: "${GIT_REPO:?GIT_REPO não definido}"
+: "${GIT_BACKUP:?GIT_BACKUP não definido}"
+: "${GIT_USERNAME:?GIT_USERNAME não definido}"
+: "${GIT_TOKEN_FILE:?GIT_TOKEN_FILE não definido}"
+: "${GIT_LOG:?GIT_LOG não definido}"
+
+exec >> "$GIT_LOG" 2>&1
+log() { printf '[%s] %s\n' "$(date '+%Y-%m-%d %H:%M:%S%z')" "$*"; }
+finish() {
+  local status=$?
+  if [[ "$status" -eq 0 ]]; then
+    log "Backup concluído."
+  else
+    log "Backup falhou (código $status)."
+  fi
+}
+trap finish EXIT
+log "Iniciando backup de repositórios para $GIT_BACKUP."
+
+[[ -r "$GIT_TOKEN_FILE" ]] || { echo "Token file is not readable: $GIT_TOKEN_FILE" >&2; exit 1; }
+GH_TOKEN="$(<"$GIT_TOKEN_FILE")"
+[[ -n "$GH_TOKEN" ]] || { echo "Token file is empty: $GIT_TOKEN_FILE" >&2; exit 1; }
+export GH_TOKEN
+gh auth status >/dev/null
+gh auth setup-git
+
+repo_names="$(gh repo list "$GIT_USERNAME" --limit 1000 --json name --jq '.[].name')"
+[[ -n "$repo_names" ]] || { echo "No repositories found for $GIT_USERNAME; backup was not changed." >&2; exit 1; }
+
+while IFS= read -r repo; do
+  [[ -n "$repo" ]] || continue
+  repo_path="$GIT_REPO/$repo"
+  if [[ -d "$repo_path" ]]; then
+    if git -C "$repo_path" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+      echo "Updating repository '$repo'"
+      git -C "$repo_path" pull --ff-only
+    else
+      echo "Directory exists but is not a Git repository: $repo_path" >&2
+      exit 1
+    fi
+  else
+    gh repo clone "$GIT_USERNAME/$repo" "$repo_path"
+  fi
+done <<< "$repo_names"
+
+rsync -a --delete -- "$GIT_REPO/" "$GIT_BACKUP/"
+EOF
+  chmod 0755 "$GIT_APP/git_backup.sh"
+  chown root:root "$GIT_APP/git_backup.sh"
+
+  cat > /etc/systemd/system/git-backup.service <<EOF
+[Unit]
+Description=Git Backup Service
+Wants=network-online.target
+After=network-online.target
+RequiresMountsFor=$GIT_REPO $GIT_BACKUP
+
+[Service]
+Type=oneshot
+UMask=0077
+TimeoutStartSec=infinity
+TimeoutStopSec=180
+User=$USER_NAME
+Group=$git_group
+Environment=HOME=$USER_HOME
+Environment=GIT_REPO=$GIT_REPO
+Environment=GIT_BACKUP=$GIT_BACKUP
+Environment=GIT_USERNAME=$GIT_USERNAME
+Environment=GIT_TOKEN_FILE=$GIT_TOKEN_FILE
+Environment=GIT_LOG=$GIT_LOG
+ExecStart=$GIT_APP/git_backup.sh
+EOF
+
+  cat > /etc/systemd/system/git-backup.timer <<EOF
+[Unit]
+Description=Run Git Backup Daily
+
+[Timer]
+OnCalendar=daily
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+EOF
+
+  systemctl daemon-reload
+  systemctl enable --now git-backup.timer
+  log "Backup GitHub diário configurado: $GIT_REPO -> $GIT_BACKUP."
+}
+
 uninstall_samba() {
   systemctl disable --now smbd nmbd 2>/dev/null || true
   firewall_delete tcp 139,445
@@ -1426,6 +1570,7 @@ uninstall_dlna() {
 WSDD_PKG=""
 RUN_ALL="no"
 HAS_UNINSTALL="no"
+GIT_REQUESTED="no"
 declare -a SELECTED_STEPS=()
 
 if [[ $# -eq 0 ]]; then
@@ -1457,6 +1602,7 @@ while [[ $# -gt 0 ]]; do
     --syncthing) SELECTED_STEPS+=(syncthing) ;;
     --ssh)       SELECTED_STEPS+=(ssh) ;;
     --dlna)      SELECTED_STEPS+=(dlna) ;;
+    --git)       SELECTED_STEPS+=(git); GIT_REQUESTED="yes" ;;
     --uninstall-samba|--unistall-samba) SELECTED_STEPS+=(uninstall_samba); HAS_UNINSTALL="yes" ;;
     --uninstall-discovery|--unistall-discovery) SELECTED_STEPS+=(uninstall_discovery); HAS_UNINSTALL="yes" ;;
     --uninstall-ntp|--unistall-ntp) SELECTED_STEPS+=(uninstall_ntp); HAS_UNINSTALL="yes" ;;
@@ -1502,11 +1648,12 @@ fi
 
 if [[ "$RUN_ALL" == "yes" ]]; then
   SELECTED_STEPS=(network raid storage user ssh samba discovery ntp dns speedtest iperf3 marcelino_server web anytype syncthing dlna)
+  [[ "$GIT_REQUESTED" != "yes" ]] || SELECTED_STEPS+=(git)
 fi
 
 # Run in canonical order, regardless of the argument order
 ORDERED_STEPS=()
-for s in network raid storage user ssh samba discovery ntp dns speedtest iperf3 marcelino_server web anytype syncthing dlna \
+for s in network raid storage user ssh samba discovery ntp dns speedtest iperf3 marcelino_server web anytype syncthing dlna git \
   start_iperf3 stop_iperf3 restart_iperf3 enable_iperf3 disable_iperf3 \
   uninstall_samba uninstall_discovery uninstall_ntp uninstall_dns uninstall_speedtest uninstall_iperf3 \
   uninstall_marcelino_server uninstall_web uninstall_anytype uninstall_syncthing uninstall_ssh uninstall_dlna; do
@@ -1555,6 +1702,7 @@ for step in "${SELECTED_STEPS[@]}"; do
     syncthing) setup_syncthing ;;
     ssh)       setup_ssh ;;
     dlna)      setup_dlna ;;
+    git)       configure_git ;;
     uninstall_samba)     uninstall_samba ;;
     uninstall_discovery) uninstall_discovery ;;
     uninstall_ntp)      uninstall_ntp ;;

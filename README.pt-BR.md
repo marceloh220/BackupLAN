@@ -10,7 +10,7 @@ Uma versão alternativa multiplataforma em .NET do Marcelino Client está dispon
 
 | Componente | Arquivo | Função |
 |---|---|---|
-| Configuração do NAS | `nas-setup.sh` | Prepara IP estático, armazenamento, Samba, descoberta de rede, NTP, DNS/DHCP com bloqueio de anúncios/rastreadores e firewall. |
+| Configuração do NAS | `nas-setup.sh` | Prepara IP estático, armazenamento, Samba, descoberta de rede, NTP, DNS/DHCP com bloqueio de anúncios/rastreadores, backup de repositórios GitHub e firewall. |
 | Teste de velocidade | `marcelinoSpeedtest.py` | Mede download, upload e ping; registra resultados em JSONL, lista testes e gera gráficos. |
 | Agente de estatísticas | `marcelinoServer.py` | Publica métricas do servidor, estado dos arrays RAID e regras de compartilhamento Samba em JSON. |
 | Serviço systemd | `marcelinoServer.service` | Executa o agente após a inicialização do sistema. |
@@ -49,7 +49,8 @@ Cada opção de serviço instala suas dependências, configura o serviço e abre
 | `--syncthing` / `--uninstall-syncthing` | Instala/remove Syncthing como serviço do usuário principal, com portas de sincronização na LAN; configuração, identidade e pastas sincronizadas são preservadas. |
 | `--ssh` / `--uninstall-ssh` | Instala/configura ou remove o servidor SSH, configurações gerenciadas e regra da porta `SSH_PORT`. A desinstalação encerra o acesso SSH remoto. |
 | `--dlna` / `--uninstall-dlna` | Instala/remove MiniDLNA e abre/fecha SSDP e a porta `DLNA_PORT`; mídia, banco/cache e logs são preservados. |
-| `--all` | Configura rede, RAID, armazenamento, usuário e todos os serviços, incluindo SSH, iperf3, Syncthing e DLNA. Não executa desinstalações. |
+| `--git` | Configura backup diário de repositórios GitHub de `GIT_REPO` para `GIT_BACKUP`. Requer usuário principal, armazenamento montado e arquivo de token legível. |
+| `--all` | Configura rede, RAID, armazenamento, usuário e todos os serviços, incluindo SSH, iperf3, Syncthing e DLNA. O backup Git fica excluído, a menos que `--git` seja informado explicitamente. Não executa desinstalações. |
 
 As opções de desinstalação aceitam também a grafia `--unistall-*` por compatibilidade. Não há opção para desinstalar RAID ou armazenamento: nenhuma opção de remoção apaga partições, altera LUKS, desmonta volumes ou desativa arrays RAID. O firewall não é redefinido; somente as regras da etapa selecionada são alteradas.
 
@@ -59,9 +60,11 @@ As opções são editadas na seção **CONFIGURAÇÃO** no começo do script. Os
 - Sistema de arquivos configurável em `RAID_FILESYSTEM`: `ext4` (padrão), `xfs` ou `btrfs`.
 - Volume em `/srv/nas`; LUKS habilitado sobre `/dev/md0`, com mapeamento `nas_crypt`, keyfile `/etc/nas.key` e desbloqueio automático.
 - Aplicativos em `APP_STORAGE` (padrão `/srv/app`): Monitor, Anytype, configuração do Syncthing e banco/cache DLNA. Esse caminho não fica automaticamente no RAID nem dentro do LUKS; configure uma montagem própria ou use um caminho dentro do volume se precisar dessa proteção.
-- Shares `Publico`, `Privado`, `Backup`, `Midia`, `Monitor` e o share do usuário principal (`USER_NAME` com a primeira letra maiúscula).
+- Backup Git: `GIT_APP` armazena o script; `GIT_REPO` armazena os repositórios clonados e `GIT_BACKUP` é o destino do espelho. Os dois caminhos de repositório devem estar em armazenamento montado.
+- Shares `Publico`, `Privado`, `Backup`, `Midia`, `Monitor`, `Anytype` e o share do usuário principal (`USER_NAME` com a primeira letra maiúscula).
 - `Publico` permite convidados; `Backup` e `Midia` usam o grupo `nasgroup`; `Privado` e o share do usuário são restritos a `USER_NAME`.
-- Usuário principal: `USER_NAME` e `USER_PASSWORD` (troque o valor `sua_senha_aqui`; mínimo 8 caracteres para novos cadastros). Se `USER_PASSWORD=""`, a senha será solicitada interativamente no terminal, sem exibir os caracteres digitados, quando necessária para cadastrar contas ou configurar o login web. Em execuções não interativas, preencha a variável previamente. Contas Linux e Samba existentes mantêm suas senhas; se ambas já existirem, a etapa de usuário não exige uma nova senha. O dashboard usa `USER_PASSWORD` separadamente para o login web. Se preenchida no script, a senha fica em texto puro; restrinja o acesso ao arquivo.
+- `Anytype` também é restrito a `USER_NAME`.
+- Usuário principal: `USER_NAME` e `USER_PASSWORD` (defina uma senha de pelo menos 8 caracteres para novos cadastros). Se `USER_PASSWORD=""`, a senha será solicitada interativamente no terminal, sem exibir os caracteres digitados, quando necessária para cadastrar contas ou configurar o login web. Em execuções não interativas, preencha a variável previamente. Contas Linux e Samba existentes mantêm suas senhas; se ambas já existirem, a etapa de usuário não exige uma nova senha. O dashboard usa `USER_PASSWORD` separadamente para o login web. Se preenchida no script, a senha fica em texto puro; restrinja o acesso ao arquivo.
 - Grupo de trabalho `WORKGROUP`, domínio `lan` (`LOCAL_DOMAIN`), SSH na porta 22 e chrony habilitado.
 - Rede: `IP_INET`, `IP_GATEWAY`, `IP_RANGE_START`, `IP_RANGE_END`, `DNS_UPSTREAM` e `LOCAL_DOMAIN` ficam no topo do script e alimentam `NAS_IP`, `NET_GATEWAY`, a faixa DHCP e o domínio. Ajuste-os para a sua rede (o NAS, o gateway e a faixa DHCP devem estar na mesma sub-rede).
 
@@ -113,6 +116,21 @@ Para remover, execute `sudo bash nas-setup.sh --uninstall-syncthing`. O serviço
 
 `--dlna` instala MiniDLNA e exige que o volume de armazenamento já esteja montado. Ajuste `DLNA_ENABLE`, `DLNA_PORT`, `DLNA_MEDIA_MUSIC`, `DLNA_MEDIA_VIDEO`, `DLNA_MEDIA_PICTURES`, `DLNA_CACHE` e `DLNA_LOG` no início de `nas-setup.sh`. A regra do UFW é criada junto com o serviço; para remover MiniDLNA e fechar as portas, execute `sudo bash nas-setup.sh --uninstall-dlna` (ou `--unistall-dlna`). A remoção mantém as mídias, o banco/cache e os logs.
 
+### Backup de repositórios GitHub
+
+`--git` instala `git`, GitHub CLI e `rsync`, e habilita o timer `git-backup.timer`, executado diariamente à meia-noite no fuso horário local do sistema. Com `Persistent=true`, uma execução perdida enquanto o timer estava inativo é iniciada quando ele volta a ficar ativo. A conta principal (`USER_NAME`) deve existir e o volume de armazenamento do NAS deve estar montado. Configure `GIT_USERNAME`, `GIT_NAME`, `GIT_EMAIL`, `GIT_APP`, `GIT_REPO`, `GIT_BACKUP`, `GIT_LOG` e `GIT_TOKEN_FILE` na seção de configuração. O arquivo deve conter um token GitHub com permissão para listar e ler os repositórios e deve ser legível por `USER_NAME`; restrinja as permissões do arquivo.
+
+Cada execução clona ou atualiza por fast-forward os repositórios pertencentes a `GIT_USERNAME` em `GIT_REPO` e, em seguida, espelha esse diretório para `GIT_BACKUP`. O espelhamento usa `rsync --delete`: arquivos removidos de `GIT_REPO` também são removidos de `GIT_BACKUP`. Não guarde arquivos sem relação com esses repositórios no destino. A saída padrão e os erros são acrescentados ao `GIT_LOG` (padrão `/srv/app/git/git_backup.log`), incluindo mensagens de início e conclusão/falha com data e hora, além da saída dos comandos Git/rsync. O arquivo pertence a `USER_NAME` e tem modo `0640`. Ele não tem rotação nem exclusão automática; monitore seu tamanho e configure rotação de logs se necessário.
+
+```bash
+sudo bash nas-setup.sh --git
+sudo systemctl start git-backup.service       # executa um backup agora
+systemctl list-timers --all git-backup.timer  # agendamento e próxima execução
+tail -n 50 /srv/app/git/git_backup.log        # saída recente do backup (GIT_LOG)
+```
+
+`--all` não configura o backup Git. Use `--all --git` somente quando quiser executar ambos explicitamente.
+
 ### Teste de velocidade da LAN (iperf3)
 
 Diferentemente de `--speedtest`, que testa a conexão com a internet, `--iperf3` mede a taxa de transferência entre outro computador e o NAS. Instala o pacote Debian `iperf3` e cria `/etc/systemd/system/iperf3.service`, executado em modo servidor com usuário dinâmico, sem privilégios de root. A instalação inicia o servidor imediatamente e habilita sua inicialização no boot.
@@ -152,7 +170,7 @@ Para remover o servidor, execute `sudo bash nas-setup.sh --uninstall-iperf3` (al
 A etapa `--speedtest` (`SPEEDTEST_ENABLE`) instala `speedtest-cli` e `python3-matplotlib`, copia `marcelinoSpeedtest.py` para `/usr/local/bin/marcelinoSpeedtest` e ativa dois timers:
 
 - `marcelinoSpeedtest.timer`: um teste de hora em hora, gravado em `SPEEDTEST_LOG` (padrão `/var/log/marcelinoSpeedtest.jsonl`).
-- `marcelinoSpeedtest-graph.timer`: todo dia às `SPEEDTEST_GRAPH_TIME` (23:55) gera o gráfico das últimas 24 horas em `SPEEDTEST_OUT/ANO/MES/` (padrão `/srv/marcelo/internet_test`), a pasta é escolhida pela data do gráfico.
+- `marcelinoSpeedtest-graph.timer`: todo dia às `SPEEDTEST_GRAPH_TIME` (23:55) gera o gráfico das últimas 24 horas em `SPEEDTEST_OUT/ANO/MES/` (padrão `/srv/nas/meneceu/internet_test`, derivado de `USER_HOME`); a pasta é escolhida pela data do gráfico.
 
 Ao atualizar uma instalação existente, os timers e o log antigos `nas-speedtest` não são migrados automaticamente. Desative os timers antigos com `sudo systemctl disable --now nas-speedtest.timer nas-speedtest-graph.timer`; o log anterior em `/var/log/nas-speedtest.jsonl` permanece separado e não aparece no histórico novo do dashboard.
 
@@ -205,7 +223,7 @@ Os PNG são nomeados `speedtest_AAAA-MM-DD_<periodo>.png` (por exemplo `speedtes
 ### IP estático, DNS e DHCP
 
 - **IP estático (`--network`):** controlado por `NET_STATIC`, `NAS_IP`, `NAS_PREFIX`, `NET_IFACE` e `NET_GATEWAY`. Interface e gateway vazios são detectados pela rota padrão. Se `LAN_CIDR` estiver vazio, é derivado de `NAS_IP/NAS_PREFIX`.
-- **DNS (`--dns`, `DNS_ENABLE`):** dnsmasq com cache, resolvedores externos em `DNS_UPSTREAM` e domínio local `DNS_DOMAIN`. Clientes DHCP são registrados por nome (`pc1` e `pc1.lan`) e o próprio NAS responde pelo `NAS_IP`. Para cadastrar máquinas com IP fixo, acrescente pares `[hostname]=IP` ao dicionário `DNS_LOCAL_HOSTS`, por exemplo `declare -A DNS_LOCAL_HOSTS=( [router]="$IP_GATEWAY" [impressora]="192.168.0.20" )`; cada host responderá pelo nome curto e por `hostname.DNS_DOMAIN`. Alternativamente, entradas de `/etc/hosts` também são servidas após remover endereços loopback (`127.x.x.x` e `::1`); reexecute `sudo bash nas-setup.sh --dns` após alterá-las. O `systemd-resolved` é desativado e o `/etc/resolv.conf` do NAS aponta para `127.0.0.1`. A configuração ativa `log-queries=extra` e `log-dhcp`; as listas de acessos liberados/bloqueados exibem os últimos eventos da última hora. O agente guarda os eventos classificados em `/var/log/marcelinoServer/dnsmasq-access.jsonl`, com rotação de 5 MB e três cópias, e o journal original pode ser consultado com `journalctl -u dnsmasq`.
+- **DNS (`--dns`, `DNS_ENABLE`):** dnsmasq com cache, resolvedores externos em `DNS_UPSTREAM` e domínio local `DNS_DOMAIN`. Clientes DHCP são registrados por nome (`pc1` e `pc1.lan`) e o próprio NAS responde pelo `NAS_IP`. Cadastre hosts estáticos como entradas `[hostname]="IP"` em `DNS_STATIC_LOCAL_HOSTS`, por exemplo `declare -A DNS_STATIC_LOCAL_HOSTS=( [router]="$IP_GATEWAY" [impressora]="192.168.0.20" )`; cada host responderá pelo nome curto e por `hostname.DNS_DOMAIN`. Alternativamente, entradas de `/etc/hosts` também são servidas após remover endereços loopback (`127.x.x.x` e `::1`); reexecute `sudo bash nas-setup.sh --dns` após alterá-las. O `systemd-resolved` é desativado e o `/etc/resolv.conf` do NAS aponta para `127.0.0.1`. A configuração ativa `log-queries=extra` e `log-dhcp`; as listas de acessos liberados/bloqueados exibem os últimos eventos da última hora. O agente guarda os eventos classificados em `/var/log/marcelinoServer/dnsmasq-access.jsonl`, com rotação de 5 MB e três cópias, e o journal original pode ser consultado com `journalctl -u dnsmasq`.
 - **Bloqueio de anúncios, rastreadores e malware:** as listas em `DNS_BLOCKLISTS` (padrão: StevenBlack, HaGeZi Pro e HaGeZi TIF medium) são consolidadas em `/var/lib/nas-dns/blocklist.hosts` por `/usr/local/sbin/update-dns-blocklist`, executado na instalação e semanalmente pelo timer `nas-dns-blocklist.timer`. São aceitos os formatos hosts e dnsmasq (`local=/dominio/`).
 - **DHCP (`DHCP_ENABLE`):** faixa `DHCP_RANGE_START`–`DHCP_RANGE_END` com concessão `DHCP_LEASE`; entrega gateway, o NAS como DNS e, com NTP ativo, o NAS como servidor de horário. Desative o DHCP do roteador antes para evitar dois servidores na rede.
 
