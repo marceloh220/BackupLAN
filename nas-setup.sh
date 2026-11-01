@@ -88,7 +88,7 @@ DNS_DOMAIN="$LOCAL_DOMAIN"         # Local domain provided to clients
 DNS_CACHE_SIZE=10000               # Size of the DNS cache (number of entries)
 declare -A DNS_STATIC_LOCAL_HOSTS=(
   [router]="$IP_GATEWAY"
-)                                        # Static local hosts: [hostname]=IP
+)                                  # Static local hosts: [hostname]=IP
 
 # Lists in hosts or dnsmasq format (local=/domain/)
 DNS_BLOCKLISTS=(
@@ -153,6 +153,36 @@ DLNA_MEDIA_PICTURES="$DLNA_MEDIA_DIR/Pictures"
 DLNA_CACHE="$APP_STORAGE/dlna/.dlna.cache"
 DLNA_DB="$APP_STORAGE/dlna/.dlna.db"
 DLNA_LOG="/var/log/minidlna/minidlna.log"
+
+# --- Backup configuration ---
+BACKUP_ENABLE="yes"                           # Enable backup functionality
+BACKUP_COMPRESSION="gzip"                     # gzip, bzip2, xz, or no-compress
+BACKUP_PERIOD="weekly"                        # daily, weekly, or monthly
+BACKUP_LOG="$APP_STORAGE/backup/backup.log"   # Backup log file
+BACKUP_RETENTION_DAYS=30                      # Number of days to keep backups
+BACKUP_DIR="$NAS_STORAGE/backup"              # Base backup directory
+BACKUP_EXCLUDE_TYPES=(
+  "*.tmp"
+  "*.tmp~"
+  "*.log"
+  "*.log~"
+  "*.bak"
+  "*.cache"
+  "*.swp"
+  "*.lock"
+  "*.~lock.*"
+  "*.DS_Store"
+  "*.Thumbs.db"
+  "*.cache"
+  "*.thumb"
+  "*.thumbs"
+  "*.thumbs.db"
+)                                             # File types to exclude from backups
+BACKUP_SOURCE=(
+  "$USER_HOME"
+  "$APP_STORAGE/anytype" 
+  "$APP_STORAGE/syncthing"
+)                                             # Directories to include in backups
 
 # --- Git configuration ---
 GIT_APP="$APP_STORAGE/git"                  # Git application storage
@@ -286,6 +316,7 @@ Serviços:
   --syncthing / --uninstall-syncthing
   --ssh / --uninstall-ssh
   --dlna / --uninstall-dlna
+  --backup / --uninstall-backup  Backups agendados e comando nas-backup
   --git                         Configura backup diário dos repositórios GitHub
   -h, --help                    Mostra esta ajuda
 
@@ -1076,6 +1107,276 @@ EOF
   firewall_allow tcp "$WEB_PORT" 'NAS dashboard web'
 }
 
+setup_backup() {
+  [[ "$BACKUP_ENABLE" == "yes" ]] || return 0
+  ensure_packages tar gzip bzip2 xz-utils coreutils findutils util-linux
+  install -d -o root -g root -m 0700 /etc/nas-backup
+  if [[ ! -f /etc/nas-backup/config ]]; then
+    (
+      umask 077
+      printf 'BACKUP_DIR=%q\nBACKUP_LOG=%q\nBACKUP_RETENTION_DAYS=%q\nBACKUP_PERIOD=%q\nBACKUP_COMPRESSION=%q\n' \
+        "$BACKUP_DIR" "$BACKUP_LOG" "$BACKUP_RETENTION_DAYS" "$BACKUP_PERIOD" "$BACKUP_COMPRESSION"
+      printf 'BACKUP_SOURCE=('
+      for value in "${BACKUP_SOURCE[@]}"; do printf ' %q' "$value"; done
+      printf ' )\nBACKUP_EXCLUDE_TYPES=('
+      for value in "${BACKUP_EXCLUDE_TYPES[@]}"; do printf ' %q' "$value"; done
+      printf ' )\n'
+    ) > /etc/nas-backup/config
+  fi
+  cat > /usr/local/sbin/nas-backup <<'BACKUP_SCRIPT'
+#!/usr/bin/env bash
+set -euo pipefail
+umask 077
+CONFIG=/etc/nas-backup/config
+LOCK=/etc/nas-backup/lock
+help() {
+  cat <<'HELP'
+Uso: sudo nas-backup COMANDO [ARGUMENTO]
+  run                         Executar backup agora
+  logs                        Mostrar log de execucoes e alteracoes
+  sources [add|remove PASTA]   Listar, adicionar ou remover pastas absolutas
+  excludes [add|remove TIPO]   Listar, adicionar ou remover padroes (ex.: '*.tmp')
+  retention [DIAS]             Consultar ou alterar retencao (inteiro >= 1)
+  period [daily|weekly|monthly] Consultar ou alterar periodo do timer
+  compression [gzip|bzip2|xz|no-compress] Consultar ou alterar compactacao
+  destination [PASTA]          Consultar ou alterar destino (nao move backups)
+  list                        Mostrar backups existentes no destino atual
+  space                       Mostrar espaco ocupado e livre no destino
+  prune [DIAS]                Excluir apenas backups deste sistema mais antigos
+  configure                   Reaplicar configuracao ao timer systemd
+  help                        Mostrar ajuda
+HELP
+}
+[[ ${1:-help} != help && ${1:-help} != --help ]] || { help; exit 0; }
+[[ $EUID -eq 0 ]] || { echo 'Execute como root.' >&2; exit 1; }
+exec 9>"$LOCK"
+if [[ "$1" == run ]]; then
+  flock -w 60 9 || { echo 'Outro comando nas-backup esta em execucao.' >&2; exit 1; }
+else
+  flock -n 9 || { echo 'Outro comando nas-backup esta em execucao.' >&2; exit 1; }
+fi
+source "$CONFIG"
+temporary=""
+manifest=""
+running=no
+write_log() {
+  printf '[%s] %s\n' "$(date -Is)" "$*" | tee -a "$BACKUP_LOG"
+}
+fail() { echo "$*" >&2; exit 1; }
+cleanup() {
+  local status=$?
+  trap - EXIT
+  [[ -z "$temporary" ]] || rm -f -- "$temporary"
+  [[ -z "$manifest" ]] || rm -f -- "$manifest"
+  if [[ "$running" == yes && $status -ne 0 ]]; then
+    write_log "FALHA: backup nao criado (codigo $status); arquivo parcial removido." || true
+  fi
+  exit "$status"
+}
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+absolute_path() {
+  [[ "$1" == /* && "$1" != *$'\n'* && "$1" != *$'\r'* ]] || fail 'Use um caminho absoluto sem quebras de linha.'
+  realpath -m -- "$1"
+}
+positive_days() { [[ "$1" =~ ^[1-9][0-9]{0,5}$ ]] || fail 'Dias deve ser um inteiro entre 1 e 999999.'; }
+validate() {
+  BACKUP_DIR=$(absolute_path "$BACKUP_DIR")
+  BACKUP_LOG=$(absolute_path "$BACKUP_LOG")
+  [[ "$BACKUP_DIR" != / ]] || fail 'O destino nao pode ser a raiz.'
+  positive_days "$BACKUP_RETENTION_DAYS"
+  case "$BACKUP_PERIOD" in daily|weekly|monthly) ;; *) fail 'Periodo invalido.' ;; esac
+  case "$BACKUP_COMPRESSION" in gzip|bzip2|xz|no-compress) ;; *) fail 'Compactacao invalida.' ;; esac
+  local source_path
+  for source_path in "${BACKUP_SOURCE[@]}"; do
+    source_path=$(absolute_path "$source_path")
+    [[ "$source_path" != "$BACKUP_DIR" && "$source_path/" != "$BACKUP_DIR/"* ]] \
+      || fail 'Uma origem nao pode ser o destino ou estar dentro dele.'
+  done
+}
+save_config() {
+  local config_tmp value
+  config_tmp=$(mktemp /etc/nas-backup/config.XXXXXX)
+  {
+    printf 'BACKUP_DIR=%q\nBACKUP_LOG=%q\nBACKUP_RETENTION_DAYS=%q\nBACKUP_PERIOD=%q\nBACKUP_COMPRESSION=%q\n' \
+      "$BACKUP_DIR" "$BACKUP_LOG" "$BACKUP_RETENTION_DAYS" "$BACKUP_PERIOD" "$BACKUP_COMPRESSION"
+    printf 'BACKUP_SOURCE=('
+    for value in "${BACKUP_SOURCE[@]}"; do printf ' %q' "$value"; done
+    printf ' )\nBACKUP_EXCLUDE_TYPES=('
+    for value in "${BACKUP_EXCLUDE_TYPES[@]}"; do printf ' %q' "$value"; done
+    printf ' )\n'
+  } > "$config_tmp"
+  mv -- "$config_tmp" "$CONFIG"
+}
+unit_path() {
+  local value="$1"
+  value=${value//\\/\\\\}
+  value=${value//\"/\\\"}
+  value=${value//%/%%}
+  printf ' "%s"' "$value"
+}
+configure_timer() {
+  validate
+  mkdir -p -- "$BACKUP_DIR" "$(dirname -- "$BACKUP_LOG")"
+  touch -- "$BACKUP_LOG"
+  chmod 600 "$BACKUP_LOG"
+  {
+    printf '[Unit]\nDescription=NAS scheduled backup\nRequiresMountsFor='
+    unit_path "$BACKUP_DIR"
+    unit_path "$(dirname -- "$BACKUP_LOG")"
+    local source_path
+    for source_path in "${BACKUP_SOURCE[@]}"; do unit_path "$source_path"; done
+    printf '\n[Service]\nType=oneshot\nUMask=0077\nTimeoutStartSec=infinity\nExecStart=/usr/local/sbin/nas-backup run\n'
+  } > /etc/systemd/system/nas-backup.service
+  printf '[Unit]\nDescription=NAS backup timer\n[Timer]\nOnCalendar=%s\nPersistent=true\n[Install]\nWantedBy=timers.target\n' \
+    "$BACKUP_PERIOD" > /etc/systemd/system/nas-backup.timer
+  systemctl daemon-reload
+  systemctl enable nas-backup.timer
+  systemctl restart nas-backup.timer
+}
+archives() {
+  find "$BACKUP_DIR" -maxdepth 1 -type f -regextype posix-extended \
+    -regex '.*/nas-backup-[0-9]{8}T[0-9]{6}Z-[[:alnum:]]{6}\.tar(\.(gz|bz2|xz))?' "$@"
+}
+human_size() {
+  if (( $1 < 1000 )); then
+    printf '%s bytes' "$1"
+  else
+    LC_ALL=C numfmt --to=si --suffix=B --format='%.2f' "$1"
+  fi
+}
+prune() {
+  local days="$1" archive
+  positive_days "$days"
+  while IFS= read -r -d '' archive; do
+    rm -- "$archive"
+    write_log "REMOVIDO: $archive (mais de $days dias)."
+  done < <(archives ! -newermt "$days days ago" -print0)
+}
+run_backup() {
+  mkdir -p -- "$(dirname -- "$BACKUP_LOG")"
+  touch -- "$BACKUP_LOG"
+  running=yes
+  write_log "INICIO: destino=$BACKUP_DIR compactacao=$BACKUP_COMPRESSION."
+  validate
+  [[ -d "$BACKUP_DIR" ]] || { write_log 'IMPOSSIBILIDADE: destino indisponivel.'; exit 1; }
+  [[ ${#BACKUP_SOURCE[@]} -gt 0 ]] || { write_log 'IMPOSSIBILIDADE: nenhuma origem configurada.'; exit 1; }
+  manifest=$(mktemp /tmp/nas-backup-files.XXXXXX)
+  local source_path pattern raw_bytes required_bytes free_bytes extension
+  local -a filters=() compression=()
+  for pattern in "${BACKUP_EXCLUDE_TYPES[@]}"; do filters+=(-name "$pattern" -o); done
+  for source_path in "${BACKUP_SOURCE[@]}"; do
+    source_path=$(absolute_path "$source_path")
+    [[ -d "$source_path" ]] || { write_log "IMPOSSIBILIDADE: origem ausente: $source_path."; exit 1; }
+    find "$source_path" \( -path "$BACKUP_DIR" -o -path "$BACKUP_LOG" -o -path "$manifest" \
+      -o "${filters[@]}" -false \) -prune -o -print0 >> "$manifest"
+  done
+  sort -zu -o "$manifest" "$manifest"
+  raw_bytes=$(tar -cf - --no-recursion --null -T "$manifest" 2>> "$BACKUP_LOG" | wc -c)
+  required_bytes=$((raw_bytes + raw_bytes / 100 + 1048576))
+  free_bytes=$(df -B1 --output=avail -- "$BACKUP_DIR" | tail -n 1 | tr -d ' ')
+  [[ "$free_bytes" =~ ^[0-9]+$ ]] || { write_log 'IMPOSSIBILIDADE: nao foi possivel consultar espaco livre.'; exit 1; }
+  if (( free_bytes < required_bytes )); then
+    write_log "IMPOSSIBILIDADE: espaco insuficiente; necessario=$(human_size "$required_bytes"), livre=$(human_size "$free_bytes"). Nenhum novo backup criado."
+    exit 1
+  fi
+  case "$BACKUP_COMPRESSION" in
+    gzip) compression=(-z); extension=.tar.gz ;;
+    bzip2) compression=(-j); extension=.tar.bz2 ;;
+    xz) compression=(-J); extension=.tar.xz ;;
+    no-compress) extension=.tar ;;
+  esac
+  temporary=$(mktemp "$BACKUP_DIR/nas-backup-$(date -u +%Y%m%dT%H%M%SZ)-XXXXXX$extension.tmp")
+  tar -cf "$temporary" "${compression[@]}" --no-recursion --null -T "$manifest" 2>> "$BACKUP_LOG"
+  mv -- "$temporary" "${temporary%.tmp}"
+  write_log "SUCESSO: ${temporary%.tmp} ($(human_size "$(stat -c %s -- "${temporary%.tmp}")"))."
+  temporary=""
+  running=no
+  prune "$BACKUP_RETENTION_DAYS"
+}
+command_name="$1"
+shift
+case "$command_name" in
+  run) [[ $# -eq 0 ]] || fail 'run nao recebe argumentos.'; run_backup ;;
+  logs) [[ $# -eq 0 ]] || fail 'logs nao recebe argumentos.'; cat -- "$BACKUP_LOG" ;;
+  sources|excludes)
+    if [[ $# -eq 0 ]]; then
+      if [[ "$command_name" == sources ]]; then
+        for value in "${BACKUP_SOURCE[@]}"; do printf '%s\n' "$value"; done
+      else
+        for value in "${BACKUP_EXCLUDE_TYPES[@]}"; do printf '%s\n' "$value"; done
+      fi
+      exit 0
+    fi
+    [[ $# -eq 2 && ( "$1" == add || "$1" == remove ) ]] || fail 'Use add ou remove e um valor.'
+    action="$1"; value="$2"
+    [[ -n "$value" ]] || fail 'Valor vazio.'
+    if [[ "$command_name" == sources ]]; then
+      value=$(absolute_path "$value")
+      [[ "$action" != add || -d "$value" ]] || fail 'A pasta deve existir.'
+      values=("${BACKUP_SOURCE[@]}")
+    else
+      values=("${BACKUP_EXCLUDE_TYPES[@]}")
+    fi
+    updated=()
+    for existing in "${values[@]}"; do [[ "$existing" == "$value" ]] || updated+=("$existing"); done
+    [[ "$action" != add ]] || updated+=("$value")
+    if [[ "$command_name" == sources ]]; then BACKUP_SOURCE=("${updated[@]}"); else BACKUP_EXCLUDE_TYPES=("${updated[@]}"); fi
+    validate
+    save_config
+    configure_timer
+    write_log "CONFIG: $command_name $action $value."
+    ;;
+  retention|period|compression|destination)
+    [[ $# -le 1 ]] || fail 'Informe no maximo um valor.'
+    case "$command_name" in
+      retention) variable=BACKUP_RETENTION_DAYS ;;
+      period) variable=BACKUP_PERIOD ;;
+      compression) variable=BACKUP_COMPRESSION ;;
+      destination) variable=BACKUP_DIR ;;
+    esac
+    [[ $# -gt 0 ]] || { printf '%s\n' "${!variable}"; exit 0; }
+    printf -v "$variable" '%s' "$1"
+    validate
+    configure_timer
+    save_config
+    write_log "CONFIG: $command_name=${!variable}."
+    ;;
+  configure) [[ $# -eq 0 ]] || fail 'configure nao recebe argumentos.'; configure_timer ;;
+  list)
+    [[ $# -eq 0 ]] || fail 'list nao recebe argumentos.'
+    archives -printf '%TY-%Tm-%Td %TH:%TM\0%s\0%f\0' |
+      while IFS= read -r -d '' timestamp && IFS= read -r -d '' size && IFS= read -r -d '' name; do
+        printf '%s | %s | %s\n' "$timestamp" "$(human_size "$size")" "$name"
+      done | sort
+    ;;
+  space)
+    [[ $# -eq 0 ]] || fail 'space nao recebe argumentos.'
+    occupied_bytes=$(archives -print0 | du -c -B1 --files0-from=- | tail -n 1 | cut -f1)
+    read -r capacity_bytes used_bytes available_bytes percent <<< "$(df -B1 --output=size,used,avail,pcent -- "$BACKUP_DIR" | tail -n 1)"
+    printf 'Backups: %s ocupados\nDestino: %s\n' "$(human_size "$occupied_bytes")" "$BACKUP_DIR"
+    printf 'Capacidade: %s\nOcupado no destino: %s (%s)\nLivre no destino: %s\n' \
+      "$(human_size "$capacity_bytes")" "$(human_size "$used_bytes")" "$percent" "$(human_size "$available_bytes")"
+    ;;
+  prune) [[ $# -le 1 ]] || fail 'Informe no maximo um valor.'; prune "${1:-$BACKUP_RETENTION_DAYS}" ;;
+  *) fail 'Comando desconhecido. Use nas-backup help.' ;;
+esac
+BACKUP_SCRIPT
+  chmod 0750 /usr/local/sbin/nas-backup
+  /usr/local/sbin/nas-backup configure
+  log "Backups configurados. Gerenciamento: sudo nas-backup help"
+  warn "Backups de arquivos ativos nao substituem snapshots ou dumps consistentes de bancos de dados."
+}
+
+uninstall_backup() {
+  systemctl disable --now nas-backup.timer 2>/dev/null || true
+  systemctl stop nas-backup.service 2>/dev/null || true
+  rm -f /etc/systemd/system/nas-backup.service /etc/systemd/system/nas-backup.timer /usr/local/sbin/nas-backup
+  systemctl daemon-reload
+  log "Backups, logs e configuracao em /etc/nas-backup preservados."
+}
+
 setup_anytype() {
   [[ "$ANYTYPE_ENABLE" == "yes" ]] || return 0
   ensure_packages docker.io tar gzip
@@ -1602,6 +1903,7 @@ while [[ $# -gt 0 ]]; do
     --syncthing) SELECTED_STEPS+=(syncthing) ;;
     --ssh)       SELECTED_STEPS+=(ssh) ;;
     --dlna)      SELECTED_STEPS+=(dlna) ;;
+    --backup)    SELECTED_STEPS+=(backup) ;;
     --git)       SELECTED_STEPS+=(git); GIT_REQUESTED="yes" ;;
     --uninstall-samba|--unistall-samba) SELECTED_STEPS+=(uninstall_samba); HAS_UNINSTALL="yes" ;;
     --uninstall-discovery|--unistall-discovery) SELECTED_STEPS+=(uninstall_discovery); HAS_UNINSTALL="yes" ;;
@@ -1615,6 +1917,7 @@ while [[ $# -gt 0 ]]; do
     --uninstall-syncthing|--unistall-syncthing) SELECTED_STEPS+=(uninstall_syncthing); HAS_UNINSTALL="yes" ;;
     --uninstall-ssh|--unistall-ssh) SELECTED_STEPS+=(uninstall_ssh); HAS_UNINSTALL="yes" ;;
     --uninstall-dlna|--unistall-dlna) SELECTED_STEPS+=(uninstall_dlna); HAS_UNINSTALL="yes" ;;
+    --uninstall-backup) SELECTED_STEPS+=(uninstall_backup); HAS_UNINSTALL="yes" ;;
     -h|--help)   show_help; exit 0 ;;
     *)           die "Opção desconhecida: $1. Use --help para ver as opções." ;;
   esac
@@ -1636,7 +1939,7 @@ fi
 NEEDS_LAN="no"
 for step in "${SELECTED_STEPS[@]}"; do
   case "$step" in
-    marcelino_server|uninstall_marcelino_server) ;;
+    backup|uninstall_backup|marcelino_server|uninstall_marcelino_server) ;;
     samba|discovery|ntp|dns|speedtest|iperf3|web|anytype|syncthing|ssh|dlna|uninstall_*) NEEDS_LAN="yes" ;;
   esac
 done
@@ -1647,16 +1950,16 @@ if [[ "$NEEDS_LAN" == "yes" ]]; then
 fi
 
 if [[ "$RUN_ALL" == "yes" ]]; then
-  SELECTED_STEPS=(network raid storage user ssh samba discovery ntp dns speedtest iperf3 marcelino_server web anytype syncthing dlna)
+  SELECTED_STEPS=(network raid storage user ssh samba discovery ntp dns speedtest iperf3 marcelino_server web anytype syncthing dlna backup)
   [[ "$GIT_REQUESTED" != "yes" ]] || SELECTED_STEPS+=(git)
 fi
 
 # Run in canonical order, regardless of the argument order
 ORDERED_STEPS=()
-for s in network raid storage user ssh samba discovery ntp dns speedtest iperf3 marcelino_server web anytype syncthing dlna git \
+for s in network raid storage user ssh samba discovery ntp dns speedtest iperf3 marcelino_server web anytype syncthing dlna backup git \
   start_iperf3 stop_iperf3 restart_iperf3 enable_iperf3 disable_iperf3 \
   uninstall_samba uninstall_discovery uninstall_ntp uninstall_dns uninstall_speedtest uninstall_iperf3 \
-  uninstall_marcelino_server uninstall_web uninstall_anytype uninstall_syncthing uninstall_ssh uninstall_dlna; do
+  uninstall_marcelino_server uninstall_web uninstall_anytype uninstall_syncthing uninstall_ssh uninstall_dlna uninstall_backup; do
   for step in "${SELECTED_STEPS[@]}"; do
     [[ "$step" == "$s" ]] && ORDERED_STEPS+=("$s")
   done
@@ -1702,6 +2005,7 @@ for step in "${SELECTED_STEPS[@]}"; do
     syncthing) setup_syncthing ;;
     ssh)       setup_ssh ;;
     dlna)      setup_dlna ;;
+    backup)    setup_backup ;;
     git)       configure_git ;;
     uninstall_samba)     uninstall_samba ;;
     uninstall_discovery) uninstall_discovery ;;
@@ -1715,6 +2019,7 @@ for step in "${SELECTED_STEPS[@]}"; do
     uninstall_syncthing) uninstall_syncthing ;;
     uninstall_ssh)       uninstall_ssh ;;
     uninstall_dlna)      uninstall_dlna ;;
+    uninstall_backup)    uninstall_backup ;;
   esac
   if [[ "$step" == uninstall_* ]]; then
     DEBIAN_FRONTEND=noninteractive apt-get autoremove -y

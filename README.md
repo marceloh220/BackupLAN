@@ -115,6 +115,38 @@ To remove it, run `sudo bash nas-setup.sh --uninstall-syncthing`. The service, p
 
 `--dlna` installs MiniDLNA and requires the storage volume to be mounted first. Adjust `DLNA_ENABLE`, `DLNA_PORT`, `DLNA_MEDIA_MUSIC`, `DLNA_MEDIA_VIDEO`, `DLNA_MEDIA_PICTURES`, `DLNA_CACHE`, and `DLNA_LOG` at the top of `nas-setup.sh`. The UFW rule is created with the service; to remove MiniDLNA and close the ports, run `sudo bash nas-setup.sh --uninstall-dlna` (or `--unistall-dlna`). Removal preserves media, the database/cache, and logs.
 
+### Scheduled file backups
+
+Install with `sudo bash nas-setup.sh --backup` (also included in `--all`), after mounting NAS storage. `BACKUP_ENABLE=no` skips installation; it does not disable an existing timer. Initial defaults come from `BACKUP_SOURCE`, `BACKUP_EXCLUDE_TYPES`, `BACKUP_DIR`, `BACKUP_LOG`, `BACKUP_RETENTION_DAYS`, `BACKUP_COMPRESSION`, and `BACKUP_PERIOD` (weekly). Settings are saved in the root-only `/etc/nas-backup/config` and preserved on reinstallation. The weekly systemd timer runs Monday at midnight, daily runs at midnight, and monthly runs on the first day at midnight, in local time. `Persistent=true` catches up a missed run.
+
+```bash
+sudo nas-backup help
+sudo nas-backup run
+sudo nas-backup logs
+sudo nas-backup sources
+sudo nas-backup sources add '/srv/nas/my documents'
+sudo nas-backup sources remove '/srv/nas/my documents'
+sudo nas-backup excludes
+sudo nas-backup excludes add '*.iso'
+sudo nas-backup excludes remove '*.iso'
+sudo nas-backup retention 30
+sudo nas-backup period weekly                  # daily, weekly, monthly
+sudo nas-backup compression                    # show current format
+sudo nas-backup compression no-compress        # gzip, bzip2, xz, no-compress
+sudo nas-backup destination /srv/nas/backup
+sudo nas-backup list
+sudo nas-backup space
+sudo nas-backup prune                          # use configured retention
+sudo nas-backup prune 60                       # delete backups older than 60 days
+systemctl list-timers --all nas-backup.timer
+```
+
+Omit the argument to `retention`, `period`, or `destination` to show the current value. Changes update the timer immediately. Exclusion patterns match file/directory basenames; quote them to prevent shell expansion. Archives contain paths relative to `/`, with `.tar.gz`, `.tar.bz2`, `.tar.xz`, or uncompressed `.tar` extensions. Changing compression affects only future backups. The destination and log are excluded from source traversal, and overlapping sources are deduplicated. Missing sources abort the backup instead of silently creating an incomplete one.
+
+Before writing an archive, the command measures an uncompressed tar stream and checks available destination space against that size plus 1% and 1 MiB of safety margin. This reads sources twice and may conservatively refuse a backup that would fit after compression. Insufficient space, errors, starts and successful runs are recorded in `BACKUP_LOG`. Space may still change during creation; failed partial archives are removed, and completed archives are published atomically. Only this tool's archive names in the current destination are listed or pruned. Retention uses file modification time and runs after a successful backup, or manually with `prune`; unrelated files remain untouched. Changing destination does not move or clean up the previous destination.
+
+These are file-level backups, not consistent snapshots of active databases; use application dumps or stop writers when consistency is required. The independent Anytype/Git backups remain unchanged. Logs are not automatically rotated. `sudo bash nas-setup.sh --uninstall-backup` removes the command and units but preserves archives, logs, and configuration. Run isolated CLI tests with `bash tests/nas-backup.sh`; systemctl is mocked, and Git Bash also mocks the unavailable flock utility. Validate real systemd scheduling, locking, and POSIX permissions on Debian.
+
 ### GitHub repository backup
 
 `--git` installs `git`, GitHub CLI, and `rsync`, then enables `git-backup.timer`. It runs daily at midnight in the system's local time zone. With `Persistent=true`, a run missed while the timer was inactive is started when the timer becomes active again. The primary account (`USER_NAME`) must already exist, and the NAS storage volume must be mounted. Set `GIT_USERNAME`, `GIT_NAME`, `GIT_EMAIL`, `GIT_APP`, `GIT_REPO`, `GIT_BACKUP`, `GIT_LOG`, and `GIT_TOKEN_FILE` in the configuration section. The token file must contain a GitHub token with permission to list and read the repositories and must be readable by `USER_NAME` (use restrictive file permissions).

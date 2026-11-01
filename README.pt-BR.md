@@ -116,6 +116,38 @@ Para remover, execute `sudo bash nas-setup.sh --uninstall-syncthing`. O serviço
 
 `--dlna` instala MiniDLNA e exige que o volume de armazenamento já esteja montado. Ajuste `DLNA_ENABLE`, `DLNA_PORT`, `DLNA_MEDIA_MUSIC`, `DLNA_MEDIA_VIDEO`, `DLNA_MEDIA_PICTURES`, `DLNA_CACHE` e `DLNA_LOG` no início de `nas-setup.sh`. A regra do UFW é criada junto com o serviço; para remover MiniDLNA e fechar as portas, execute `sudo bash nas-setup.sh --uninstall-dlna` (ou `--unistall-dlna`). A remoção mantém as mídias, o banco/cache e os logs.
 
+### Backups agendados de arquivos
+
+Instale com `sudo bash nas-setup.sh --backup` (também incluído em `--all`), com o armazenamento do NAS montado. `BACKUP_ENABLE=no` pula a instalação, mas não desabilita um timer existente. Os padrões iniciais vêm de `BACKUP_SOURCE`, `BACKUP_EXCLUDE_TYPES`, `BACKUP_DIR`, `BACKUP_LOG`, `BACKUP_RETENTION_DAYS`, `BACKUP_COMPRESSION` e `BACKUP_PERIOD` (semanal). A configuração fica em `/etc/nas-backup/config`, acessível apenas por root, e é preservada na reinstalação. O timer semanal executa segunda-feira à meia-noite; o diário, à meia-noite; o mensal, no primeiro dia à meia-noite, no horário local. `Persistent=true` recupera uma execução perdida.
+
+```bash
+sudo nas-backup help
+sudo nas-backup run
+sudo nas-backup logs
+sudo nas-backup sources
+sudo nas-backup sources add '/srv/nas/meus documentos'
+sudo nas-backup sources remove '/srv/nas/meus documentos'
+sudo nas-backup excludes
+sudo nas-backup excludes add '*.iso'
+sudo nas-backup excludes remove '*.iso'
+sudo nas-backup retention 30
+sudo nas-backup period weekly                  # daily, weekly, monthly
+sudo nas-backup compression                    # mostra formato atual
+sudo nas-backup compression no-compress        # gzip, bzip2, xz, no-compress
+sudo nas-backup destination /srv/nas/backup
+sudo nas-backup list
+sudo nas-backup space
+sudo nas-backup prune                          # usa a retenção configurada
+sudo nas-backup prune 60                       # exclui backups com mais de 60 dias
+systemctl list-timers --all nas-backup.timer
+```
+
+Sem argumento, `retention`, `period` e `destination` mostram o valor atual. As alterações atualizam o timer imediatamente. Os padrões de exclusão correspondem ao nome de arquivos/pastas; use aspas para evitar expansão pelo shell. Os arquivos contêm caminhos relativos a `/`, com extensões `.tar.gz`, `.tar.bz2`, `.tar.xz` ou `.tar` sem compressão. Alterar a compactação afeta apenas backups futuros. O destino e o log são excluídos da varredura, e origens sobrepostas são deduplicadas. Uma origem ausente impede a execução, em vez de gerar silenciosamente um backup incompleto.
+
+Antes de gravar o arquivo, o comando mede um fluxo tar sem compressão e compara o espaço livre no destino com esse tamanho mais 1% e 1 MiB de margem. Isso lê as origens duas vezes e pode recusar, conservadoramente, um backup que caberia compactado. Falta de espaço, erros, início e sucesso ficam registrados em `BACKUP_LOG`. O espaço ainda pode mudar durante a gravação; arquivos parciais são removidos em caso de falha, e o arquivo final só é publicado após concluir. Somente nomes de backups deste comando, no destino atual, são listados ou excluídos. A retenção usa a data de modificação e é aplicada após um backup bem-sucedido ou manualmente com `prune`; outros arquivos são preservados. Alterar o destino não move nem limpa os backups anteriores.
+
+São backups de arquivos, não snapshots consistentes de bancos ativos; use dumps da aplicação ou interrompa as gravações quando precisar dessa garantia. Os backups independentes do Anytype/Git continuam inalterados. O log não tem rotação automática. `sudo bash nas-setup.sh --uninstall-backup` remove o comando e as unidades, preservando backups, logs e configuração. Execute os testes isolados com `bash tests/nas-backup.sh`; systemctl é simulado e, no Git Bash, flock também é simulado por não estar disponível. Valide agendamento systemd, bloqueio real e permissões POSIX no Debian.
+
 ### Backup de repositórios GitHub
 
 `--git` instala `git`, GitHub CLI e `rsync`, e habilita o timer `git-backup.timer`, executado diariamente à meia-noite no fuso horário local do sistema. Com `Persistent=true`, uma execução perdida enquanto o timer estava inativo é iniciada quando ele volta a ficar ativo. A conta principal (`USER_NAME`) deve existir e o volume de armazenamento do NAS deve estar montado. Configure `GIT_USERNAME`, `GIT_NAME`, `GIT_EMAIL`, `GIT_APP`, `GIT_REPO`, `GIT_BACKUP`, `GIT_LOG` e `GIT_TOKEN_FILE` na seção de configuração. O arquivo deve conter um token GitHub com permissão para listar e ler os repositórios e deve ser legível por `USER_NAME`; restrinja as permissões do arquivo.
